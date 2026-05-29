@@ -1,0 +1,749 @@
+# ============================================================
+# Living Room Master Controller - ESPHome Configuration
+# 客厅主控面板 - 通过MQTT Toggle控制Dinner Room和Kitchen Room
+# 
+# 左侧按钮 (GPIO17): Toggle Dinner Room 所有灯
+# 中间按钮 (GPIO16): Toggle Dinner Room 中间灯
+# 右侧按钮 (GPIO18): Toggle Kitchen Room 所有灯
+#
+# 物理开关: 自恢复瞬时触碰开关
+# 方案: Toggle - 主控发toggle命令，子设备自己判断状态切换
+# 功能: 启动延时保护, OTA, 事件唤醒, NOMI眼睛动画
+# 动画: 每3秒眨眼, 每5秒随机表情
+# ============================================================
+
+esphome:
+  name: living-room-master
+  friendly_name: Living Room Master Controller
+  on_boot:
+    - priority: -100
+      then:
+        - delay: 800ms
+        - lambda: |-
+            id(display_sleeping) = false;
+            id(last_activity) = millis();
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+  flash_size: 16MB
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "LivingRoomMaster"
+    password: "12345678"
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
+
+# ====== OTA ======
+ota:
+  - platform: esphome
+    password: !secret ota_password
+  - platform: web_server
+
+mqtt:
+  broker: emqx.eyefang.com
+  port: 1883
+  username: admin
+  password: admin
+  discovery: true
+  discovery_prefix: homeassistant
+  topic_prefix: living-room-master
+  birth_message:
+    topic: living-room-master/status
+    payload: online
+  will_message:
+    topic: living-room-master/status
+    payload: offline
+  id: mqtt_client
+  on_message:
+    - topic: dinner-room/left-light/state
+      then:
+        - lambda: |-
+            id(dinner_left_state) = (x == "ON");
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+              id(oled_display).update();
+            }
+    - topic: dinner-room/right-light/state
+      then:
+        - lambda: |-
+            id(dinner_right_state) = (x == "ON");
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+              id(oled_display).update();
+            }
+    - topic: dinner-room/center-light/state
+      then:
+        - lambda: |-
+            id(dinner_center_state) = (x == "ON");
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+              id(oled_display).update();
+            }
+    - topic: kitchen-room/kitchen-light/state
+      then:
+        - lambda: |-
+            id(kitchen_kitchen_state) = (x == "ON");
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+              id(oled_display).update();
+            }
+    - topic: kitchen-room/dining-light/state
+      then:
+        - lambda: |-
+            id(kitchen_dining_state) = (x == "ON");
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+              id(oled_display).update();
+            }
+
+web_server:
+  port: 80
+
+logger:
+  level: INFO
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+  frequency: 400kHz
+
+font:
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: regular
+    id: font_title
+    size: 12
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: regular
+    id: font_normal
+    size: 10
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: regular
+    id: font_small
+    size: 8
+
+# ====== Globals ======
+globals:
+  - id: eye_state
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eye_anim_frame
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: auto_anim_timer
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: current_page
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  - id: last_activity
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: screen_locked
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+
+  - id: hand_roll_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+
+  - id: lcd_sleep_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'true'
+
+  - id: lcd_sleep_interval
+    type: unsigned long
+    restore_value: false
+    initial_value: '60000'
+
+  - id: display_sleeping
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: total_pages
+    type: int
+    restore_value: false
+    initial_value: '5'
+
+  - id: boot_complete
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: auto_anim_state
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: next_auto_event
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: auto_anim_start_time
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: dinner_left_state
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: dinner_right_state
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: dinner_center_state
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: kitchen_kitchen_state
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: kitchen_dining_state
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: last_left_press
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: last_center_press
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: last_right_press
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+# ====== Switches ======
+switch:
+  - platform: template
+    name: "Dinner Room All Lights"
+    id: sw_dinner_all
+    optimistic: true
+    turn_on_action:
+      - mqtt.publish:
+          topic: dinner-room/all-lights/toggle
+          payload: ""
+    turn_off_action:
+      - mqtt.publish:
+          topic: dinner-room/all-lights/toggle
+          payload: ""
+
+  - platform: template
+    name: "Dinner Room Center Light"
+    id: sw_dinner_center
+    optimistic: true
+    turn_on_action:
+      - mqtt.publish:
+          topic: dinner-room/center-light/toggle
+          payload: ""
+    turn_off_action:
+      - mqtt.publish:
+          topic: dinner-room/center-light/toggle
+          payload: ""
+
+  - platform: template
+    name: "Kitchen Room All Lights"
+    id: sw_kitchen_all
+    optimistic: true
+    turn_on_action:
+      - mqtt.publish:
+          topic: kitchen-room/all-lights/toggle
+          payload: ""
+    turn_off_action:
+      - mqtt.publish:
+          topic: kitchen-room/all-lights/toggle
+          payload: ""
+
+  - platform: restart
+    name: "Restart Device"
+    id: device_restart
+
+  - platform: safe_mode
+    name: "Safe Mode"
+
+# ====== Binary Sensors (Toggle方案 - 瞬时开关) ======
+binary_sensor:
+  # ========== 左侧按钮: Toggle Dinner Room 全部灯 ==========
+  - platform: gpio
+    id: btn_left
+    pin:
+      number: GPIO17
+      mode:
+        input: true
+        pulldown: true
+    name: "Left - Dinner All Lights"
+    filters:
+      - delayed_on: 10ms
+    on_press:
+      then:
+        - lambda: |-
+            if (!id(boot_complete)) return;
+            if (millis() - id(last_left_press) < 500) return;
+            id(last_left_press) = millis();
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+              id(oled_display).update();
+            }
+            id(mqtt_client).publish("dinner-room/all-lights/toggle", "");
+
+  # ========== 中间按钮: Toggle Dinner Room 中间灯 ==========
+  - platform: gpio
+    id: btn_center
+    pin:
+      number: GPIO16
+      mode:
+        input: true
+        pulldown: true
+    name: "Center - Dinner Center Light"
+    filters:
+      - delayed_on: 10ms
+    on_press:
+      then:
+        - lambda: |-
+            if (!id(boot_complete)) return;
+            if (millis() - id(last_center_press) < 500) return;
+            id(last_center_press) = millis();
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+              id(oled_display).update();
+            }
+            id(mqtt_client).publish("dinner-room/center-light/toggle", "");
+
+  # ========== 右侧按钮: Toggle Kitchen Room 全部灯 ==========
+  - platform: gpio
+    id: btn_right
+    pin:
+      number: GPIO18
+      mode:
+        input: true
+        pulldown: true
+    name: "Right - Kitchen All Lights"
+    filters:
+      - delayed_on: 10ms
+    on_press:
+      then:
+        - lambda: |-
+            if (!id(boot_complete)) return;
+            if (millis() - id(last_right_press) < 500) return;
+            id(last_right_press) = millis();
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+              id(oled_display).update();
+            }
+            id(mqtt_client).publish("kitchen-room/all-lights/toggle", "");
+
+  # ========== 导航按钮 ==========
+  - platform: gpio
+    id: btn_next
+    pin:
+      number: GPIO13
+      mode:
+        input: true
+        pulldown: true
+    name: "Next Page"
+    filters:
+      - delayed_on: 10ms
+    on_press:
+      then:
+        - lambda: |-
+            if (!id(boot_complete)) return;
+            if (id(screen_locked)) return;
+            id(current_page) = (id(current_page) + 1) % id(total_pages);
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+            id(oled_display).update();
+
+  - platform: gpio
+    id: btn_prev
+    pin:
+      number: GPIO14
+      mode:
+        input: true
+        pulldown: true
+    name: "Prev Page"
+    filters:
+      - delayed_on: 10ms
+    on_press:
+      then:
+        - lambda: |-
+            if (!id(boot_complete)) return;
+            if (id(screen_locked)) return;
+            id(current_page) = (id(current_page) - 1 + id(total_pages)) % id(total_pages);
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+            id(oled_display).update();
+
+  # ========== 确认按钮 ==========
+  - platform: gpio
+    id: btn_confirm
+    pin:
+      number: GPIO12
+      mode:
+        input: true
+        pulldown: true
+    name: "Confirm"
+    filters:
+      - delayed_on: 10ms
+    on_click:
+      - min_length: 0ms
+        max_length: 5000ms
+        then:
+          - lambda: |-
+              if (!id(boot_complete)) return;
+              if (id(screen_locked)) {
+                id(last_activity) = millis();
+                if (id(display_sleeping)) {
+                  id(display_sleeping) = false;
+                  id(oled_display).update();
+                }
+                return;
+              }
+              id(last_activity) = millis();
+              if (id(display_sleeping)) {
+                id(display_sleeping) = false;
+                id(oled_display).update();
+                return;
+              }
+              switch (id(current_page)) {
+                case 0:
+                  id(hand_roll_enabled) = !id(hand_roll_enabled);
+                  break;
+                case 1:
+                  id(mqtt_client).publish("dinner-room/all-lights/toggle", "");
+                  break;
+                case 2:
+                  id(mqtt_client).publish("dinner-room/center-light/toggle", "");
+                  break;
+                case 3:
+                  id(mqtt_client).publish("kitchen-room/all-lights/toggle", "");
+                  break;
+              }
+              id(oled_display).update();
+      - min_length: 5000ms
+        max_length: 10000ms
+        then:
+          - lambda: |-
+              id(screen_locked) = !id(screen_locked);
+              id(last_activity) = millis();
+              if (id(display_sleeping)) id(display_sleeping) = false;
+              id(oled_display).update();
+
+# ====== Timers ======
+interval:
+  - interval: 2000ms
+    then:
+      - lambda: |-
+          if (!id(boot_complete)) {
+            id(boot_complete) = true;
+            id(next_auto_event) = millis() + 2000;
+            id(auto_anim_state) = 0;
+          }
+
+  - interval: 16ms
+    then:
+      - lambda: |-
+          if (!id(boot_complete)) return;
+          if (id(screen_locked)) return;
+          if (id(display_sleeping)) return;
+          if (id(current_page) != 0) return;
+          
+          unsigned long now = millis();
+          id(auto_anim_timer) += 16;
+          
+          if (id(eye_state) == 0 && id(auto_anim_state) == 0) {
+            if (now >= id(next_auto_event)) {
+              if (id(auto_anim_timer) % 3000 < 16) {
+                id(eye_state) = 1;
+                id(eye_anim_frame) = 0;
+                id(auto_anim_state) = 1;
+              }
+            }
+          }
+          
+          if (id(eye_state) == 0 && id(auto_anim_state) == 0) {
+            if (now >= id(next_auto_event)) {
+              if (id(auto_anim_timer) % 5000 < 16) {
+                int r = esp_random() % 100;
+                if (r < 30) id(eye_state) = 2;
+                else if (r < 55) id(eye_state) = 3;
+                else if (r < 70) id(eye_state) = 4;
+                else if (r < 80) id(eye_state) = 5;
+                else if (r < 90) id(eye_state) = 6;
+                if (id(eye_state) != 0) {
+                  id(eye_anim_frame) = 0;
+                  id(auto_anim_state) = 2;
+                }
+              }
+            }
+          }
+          
+          if (id(auto_anim_state) > 0) id(eye_anim_frame) += 1;
+          
+          if (id(eye_state) > 1 && id(eye_anim_frame) > 20) {
+            id(eye_state) = 0; id(eye_anim_frame) = 0;
+            id(auto_anim_state) = 0;
+            id(next_auto_event) = now + 2000 + (esp_random() % 3000);
+          }
+          
+          if (id(eye_state) == 1 && id(eye_anim_frame) > 6) {
+            id(eye_state) = 0; id(eye_anim_frame) = 0;
+            id(auto_anim_state) = 0;
+            id(next_auto_event) = now + 1000 + (esp_random() % 2000);
+          }
+          
+          id(oled_display).update();
+
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(lcd_sleep_enabled) && !id(screen_locked) && !id(display_sleeping)) {
+            if (millis() - id(last_activity) > id(lcd_sleep_interval)) {
+              id(display_sleeping) = true;
+              id(oled_display).update();
+            }
+          }
+
+  - interval: 30s
+    then:
+      - mqtt.publish:
+          topic: dinner-room/status/request
+          payload: ""
+      - mqtt.publish:
+          topic: kitchen-room/status/request
+          payload: ""
+
+# ====== Sensors ======
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+
+# ====== Text Sensors ======
+text_sensor:
+  - platform: template
+    name: "Current Page"
+    id: current_page_name
+    lambda: |-
+      switch (id(current_page)) {
+        case 0: return {"Home"};
+        case 1: return {"Dinner All"};
+        case 2: return {"Dinner Center"};
+        case 3: return {"Kitchen All"};
+        case 4: return {"Messages"};
+        default: return {"Unknown"};
+      }
+    update_interval: 1s
+
+  - platform: template
+    name: "Lock Status"
+    id: lock_status
+    lambda: |-
+      return id(screen_locked) ? "Locked" : "Unlocked";
+    update_interval: 1s
+
+  - platform: template
+    name: "Dinner Room Status"
+    id: dinner_status
+    lambda: |-
+      int count = id(dinner_left_state) + id(dinner_right_state) + id(dinner_center_state);
+      if (count == 3) return {"All ON"};
+      if (count == 0) return {"All OFF"};
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%d/3 ON", count);
+      return {buf};
+    update_interval: 2s
+
+  - platform: template
+    name: "Kitchen Room Status"
+    id: kitchen_status
+    lambda: |-
+      int count = id(kitchen_kitchen_state) + id(kitchen_dining_state);
+      if (count == 2) return {"All ON"};
+      if (count == 0) return {"All OFF"};
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%d/2 ON", count);
+      return {buf};
+    update_interval: 2s
+
+# ====== NOMI Eyes Display ======
+display:
+  - platform: ssd1306_i2c
+    model: "SH1106 128x64"
+    address: 0x3C
+    id: oled_display
+    rotation: 0
+    update_interval: never
+    lambda: |-
+      it.fill(COLOR_OFF);
+      
+      if (!id(boot_complete)) {
+        it.print(64, 24, id(font_title), TextAlign::CENTER, "Starting...");
+        it.print(64, 40, id(font_normal), TextAlign::CENTER, "Master Controller");
+        return;
+      }
+      
+      if (id(display_sleeping)) return;
+      
+      if (id(screen_locked)) {
+        it.print(64, 24, id(font_title), TextAlign::CENTER, "SCREEN LOCKED");
+        it.print(64, 40, id(font_normal), TextAlign::CENTER, "Hold OK to unlock");
+        return;
+      }
+      
+      switch (id(current_page)) {
+        case 0: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Living Room");
+          it.horizontal_line(0, 17, 128);
+          
+          int L_CX = 40, R_CX = 88, EYE_CY = 38;
+          int EYE_R = 13, PUPIL_R = 5, IRIS_R = 7;
+          int px = 0, py = 1, blink = 0, top_r = 13, bot_r = 13;
+          
+          switch (id(eye_state)) {
+            case 0: px = 0; py = 1; blink = 0; top_r = 13; bot_r = 13; break;
+            case 1: {
+              int f = id(eye_anim_frame);
+              if (f < 2) blink = f * 7;
+              else if (f < 3) blink = 14;
+              else if (f < 5) blink = 14 - (f - 2) * 7;
+              else blink = 0;
+              px = 0; py = 1; top_r = 13; bot_r = 13; break;
+            }
+            case 2: px = -5; py = 1; blink = 0; top_r = 13; bot_r = 13; break;
+            case 3: px = 5; py = 1; blink = 0; top_r = 13; bot_r = 13; break;
+            case 4: px = 0; py = 2; blink = 3; top_r = 10; bot_r = 5; break;
+            case 5: px = 0; py = 0; blink = -2; top_r = 16; bot_r = 14; break;
+            case 6: px = 0; py = 1; blink = 7; top_r = 6; bot_r = 11; break;
+          }
+          
+          auto draw_nomi_eye = [&](int cx, int cy) {
+            if (blink >= 24) { it.horizontal_line(cx - 12, cy, 24); return; }
+            int t = blink > 0 ? top_r - blink : top_r; if (t < 0) t = 0;
+            if (t > 0) for (int x = -EYE_R; x <= EYE_R; x++) {
+              float ratio = (float)x / (float)EYE_R;
+              float sq = 1.0f - ratio * ratio; if (sq < 0) sq = 0;
+              int y_off = (int)((float)t * sqrtf(sq));
+              for (int y = -y_off; y <= 0; y++) it.draw_pixel_at(cx + x, cy + y);
+            }
+            int b = (blink > 4) ? bot_r - (blink - 4) : bot_r; if (b < 0) b = 0;
+            if (b > 0) for (int x = -EYE_R; x <= EYE_R; x++) {
+              float ratio = (float)x / (float)EYE_R;
+              float sq = 1.0f - ratio * ratio; if (sq < 0) sq = 0;
+              int y_off = (int)((float)b * sqrtf(sq));
+              for (int y = 0; y <= y_off; y++) it.draw_pixel_at(cx + x, cy + y);
+            }
+            if (blink < 16) {
+              int ppx = cx + px, ppy = cy + py;
+              it.filled_circle(ppx, ppy, IRIS_R);
+              it.filled_circle(ppx, ppy, PUPIL_R);
+              it.filled_circle(ppx, ppy, PUPIL_R - 2);
+              it.draw_pixel_at(ppx - 2, ppy - 2);
+              it.draw_pixel_at(ppx - 1, ppy - 3);
+              it.draw_pixel_at(ppx + 1, ppy + 1);
+            }
+          };
+          
+          draw_nomi_eye(L_CX, EYE_CY);
+          draw_nomi_eye(R_CX, EYE_CY);
+          
+          it.print(64, 58, id(font_small), TextAlign::CENTER, 
+            id(hand_roll_enabled) ? "Manual | Press OK" : "Auto | Press OK");
+          break;
+        }
+        
+        case 1: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Dinner Room");
+          it.horizontal_line(0, 17, 128);
+          it.print(64, 28, id(font_normal), TextAlign::CENTER, "All Lights");
+          int count = id(dinner_left_state) + id(dinner_right_state) + id(dinner_center_state);
+          if (count == 3) it.print(64, 44, id(font_title), TextAlign::CENTER, "ALL ON");
+          else if (count == 0) it.print(64, 44, id(font_title), TextAlign::CENTER, "ALL OFF");
+          else it.printf(64, 44, id(font_title), TextAlign::CENTER, "%d/3 ON", count);
+          it.print(64, 59, id(font_small), TextAlign::CENTER, "Press OK to toggle");
+          break;
+        }
+        
+        case 2: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Dinner Room");
+          it.horizontal_line(0, 17, 128);
+          it.print(64, 28, id(font_normal), TextAlign::CENTER, "Center Light");
+          it.print(64, 44, id(font_title), TextAlign::CENTER, id(dinner_center_state) ? "ON" : "OFF");
+          it.filled_circle(64, 52, 3);
+          it.print(64, 59, id(font_small), TextAlign::CENTER, "Press OK to toggle");
+          break;
+        }
+        
+        case 3: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Kitchen Room");
+          it.horizontal_line(0, 17, 128);
+          it.print(64, 28, id(font_normal), TextAlign::CENTER, "All Lights");
+          int count = id(kitchen_kitchen_state) + id(kitchen_dining_state);
+          if (count == 2) it.print(64, 44, id(font_title), TextAlign::CENTER, "ALL ON");
+          else if (count == 0) it.print(64, 44, id(font_title), TextAlign::CENTER, "ALL OFF");
+          else it.printf(64, 44, id(font_title), TextAlign::CENTER, "%d/2 ON", count);
+          it.print(64, 59, id(font_small), TextAlign::CENTER, "Press OK to toggle");
+          break;
+        }
+        
+        case 4: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "AI Message");
+          it.horizontal_line(0, 17, 128);
+          it.print(64, 36, id(font_normal), TextAlign::CENTER, "No messages");
+          break;
+        }
+      }
+      
+      it.printf(114, 58, id(font_small), TextAlign::CENTER, "%d/%d", id(current_page) + 1, id(total_pages));
+      if (id(current_page) == 0 && id(hand_roll_enabled)) it.print(10, 10, id(font_small), TextAlign::CENTER, "M");

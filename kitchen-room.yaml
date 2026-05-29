@@ -1,0 +1,1091 @@
+# ============================================================
+# Kitchen Room ESPHome Configuration
+# Based on PinConfig from device: MKRPRYMX
+# Display: SH1106 128x64 I2C | Flash: 4MB
+# Pins: SCL=22, SDA=21
+# Kitchen Light=17, Kitchen Switch=16
+# Dining Light=27, Dining Switch=19
+# Study/Child Switch=32
+# MQTT: emqx.eyefang.com:1883
+# 动画逻辑: 每3秒眨眼, 每5秒随机表情
+# 继电器: 低电平触发 (inverted: true)
+# Toggle支持: 客厅主控通过toggle主题切换灯光
+# 抗干扰: 软件GPIO锁定 + 多重启动保护 + 状态监控
+# ============================================================
+
+esphome:
+  name: kitchen-room
+  friendly_name: Kitchen Room
+  on_boot:
+    # 优先级 800：直接寄存器操作，最快速度锁定GPIO
+    - priority: 800
+      then:
+        - lambda: |-
+            // 使用 ESP-IDF 原生 GPIO 函数
+            gpio_set_direction(GPIO_NUM_17, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_17, 1);  // HIGH = 关闭 (inverted: true)
+            
+            gpio_set_direction(GPIO_NUM_27, GPIO_MODE_OUTPUT);
+            gpio_set_level(GPIO_NUM_27, 1);  // HIGH = 关闭 (inverted: true)
+            
+            ESP_LOGI("boot", "GPIO direct init: GPIO17=HIGH, GPIO27=HIGH");
+    
+    # 优先级 700：硬件抽象层确认
+    - priority: 700
+      then:
+        - output.turn_off: kitchen_light_output
+        - output.turn_off: dining_light_output
+        - lambda: |-
+            ESP_LOGI("boot", "GPIO output layer: GPIO17=%d, GPIO27=%d", 
+                     gpio_get_level(GPIO_NUM_17), gpio_get_level(GPIO_NUM_27));
+    
+    # 优先级 600：二次确认
+    - priority: 600
+      then:
+        - output.turn_off: kitchen_light_output
+        - output.turn_off: dining_light_output
+    
+    # 优先级 500：延迟后再次确认
+    - priority: 500
+      then:
+        - delay: 100ms
+        - output.turn_off: kitchen_light_output
+        - output.turn_off: dining_light_output
+    
+    # 优先级 400：解除启动保护
+    - priority: 400
+      then:
+        - delay: 500ms
+        - lambda: |-
+            id(boot_protection_active) = false;
+            id(boot_complete) = true;
+            ESP_LOGI("boot", "Boot protection released, system ready");
+    
+    # 优先级 250：应用层确认
+    - priority: 250
+      then:
+        - light.turn_off: kitchen_light
+        - light.turn_off: dining_light
+        - lambda: |-
+            id(display_sleeping) = false;
+            id(last_activity) = millis();
+    
+    # 优先级 -100：网络层最终检查
+    - priority: -100
+      then:
+        - delay: 500ms
+        - if:
+            condition:
+              lambda: 'return id(kitchen_light).remote_values.is_on();'
+            then:
+              - light.turn_off: kitchen_light
+        - if:
+            condition:
+              lambda: 'return id(dining_light).remote_values.is_on();'
+            then:
+              - light.turn_off: dining_light
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+  flash_size: 4MB
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "KitchenRoom"
+    password: "12345678"
+  power_save_mode: none
+  fast_connect: true
+  reboot_timeout: 15min
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
+
+# ====== OTA ======
+ota:
+  - platform: esphome
+    password: !secret ota_password
+  - platform: web_server
+
+mqtt:
+  broker: emqx.eyefang.com
+  port: 1883
+  username: admin
+  password: admin
+  discovery: true
+  discovery_prefix: homeassistant
+  topic_prefix: kitchen-room
+  birth_message:
+    topic: kitchen-room/status
+    payload: online
+  will_message:
+    topic: kitchen-room/status
+    payload: offline
+  id: mqtt_client
+  
+  on_connect:
+    then:
+      - mqtt.publish:
+          topic: kitchen-room/status
+          payload: online
+      - lambda: |-
+          ESP_LOGI("mqtt", "MQTT Connected to broker");
+  
+  on_disconnect:
+    then:
+      - lambda: |-
+          ESP_LOGW("mqtt", "MQTT Disconnected from broker");
+  
+  # ====== 状态反馈 + 控制主题 + Toggle支持 ======
+  on_message:
+    - topic: kitchen-room/status/request
+      then:
+        - mqtt.publish:
+            topic: kitchen-room/kitchen-light/state
+            payload: !lambda 'return id(kitchen_light).remote_values.is_on() ? "ON" : "OFF";'
+        - mqtt.publish:
+            topic: kitchen-room/dining-light/state
+            payload: !lambda 'return id(dining_light).remote_values.is_on() ? "ON" : "OFF";'
+    
+    - topic: kitchen-room/kitchen-light/set
+      then:
+        - if:
+            condition:
+              lambda: 'return x == "ON";'
+            then:
+              - light.turn_on: kitchen_light
+            else:
+              - light.turn_off: kitchen_light
+    
+    - topic: kitchen-room/dining-light/set
+      then:
+        - lambda: |-
+            static unsigned long last_mqtt_toggle = 0;
+            static std::string last_command = "";
+            unsigned long now = millis();
+            std::string cmd(x.c_str());
+            
+            if (now - last_mqtt_toggle < 200 && cmd == last_command) {
+              ESP_LOGW("mqtt", "Duplicate MQTT command ignored: %s", cmd.c_str());
+              return;
+            }
+            last_mqtt_toggle = now;
+            last_command = cmd;
+            
+            if (id(dining_output_locked)) {
+              ESP_LOGW("mqtt", "Output locked, MQTT command ignored");
+              return;
+            }
+            
+            if (cmd == "ON") {
+              id(dining_light).turn_on().perform();
+            } else {
+              id(dining_light).turn_off().perform();
+            }
+    
+    - topic: kitchen-room/all-lights/set
+      then:
+        - if:
+            condition:
+              lambda: 'return x == "ON";'
+            then:
+              - light.turn_on: kitchen_light
+              - light.turn_on: dining_light
+            else:
+              - light.turn_off: kitchen_light
+              - light.turn_off: dining_light
+    
+    # ====== Toggle 支持 ======
+    - topic: kitchen-room/all-lights/toggle
+      then:
+        - lambda: |-
+            bool all_on = id(kitchen_light).remote_values.is_on() && 
+                          id(dining_light).remote_values.is_on();
+            if (all_on) {
+              id(mqtt_client).publish("kitchen-room/all-lights/set", "OFF");
+            } else {
+              id(mqtt_client).publish("kitchen-room/all-lights/set", "ON");
+            }
+    
+    - topic: kitchen-room/kitchen-light/toggle
+      then:
+        - light.toggle: kitchen_light
+    
+    - topic: kitchen-room/dining-light/toggle
+      then:
+        - if:
+            condition:
+              lambda: 'return !id(dining_output_locked);'
+            then:
+              - light.toggle: dining_light
+            else:
+              - lambda: 'ESP_LOGW("mqtt", "Toggle ignored - output locked");'
+
+web_server:
+  port: 80
+
+logger:
+  level: DEBUG
+  logs:
+    light: DEBUG
+    mqtt: INFO
+    boot: DEBUG
+    output: WARN
+    health: INFO
+    wifi: INFO
+    api: INFO
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+  frequency: 400kHz
+
+font:
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: regular
+    id: font_title
+    size: 12
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: regular
+    id: font_normal
+    size: 10
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: regular
+    id: font_small
+    size: 8
+
+# ====== Globals ======
+globals:
+  - id: current_page
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  - id: last_activity
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: screen_locked
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+
+  - id: display_sleeping
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: total_pages
+    type: int
+    restore_value: false
+    initial_value: '4'
+
+  - id: eye_state
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eye_anim_frame
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: auto_anim_timer
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: hand_roll_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+
+  - id: lcd_sleep_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'true'
+
+  - id: lcd_sleep_interval
+    type: unsigned long
+    restore_value: false
+    initial_value: '60000'
+
+  - id: boot_complete
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: boot_protection_active
+    type: bool
+    restore_value: false
+    initial_value: 'true'
+
+  - id: auto_anim_state
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: next_auto_event
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: auto_anim_start_time
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  # ====== 抗干扰相关 globals ======
+  - id: dining_output_locked
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: last_output_change
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: output_change_count
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+# ====== Outputs (低电平触发, inverted: true) ======
+output:
+  - platform: gpio
+    pin:
+      number: GPIO17
+      mode: output
+    id: kitchen_light_output
+    inverted: true
+
+  - platform: gpio
+    pin:
+      number: GPIO27
+      mode: output
+    id: dining_light_output
+    inverted: true
+
+# ====== Lights ======
+light:
+  - platform: binary
+    name: "Kitchen Light"
+    id: kitchen_light
+    output: kitchen_light_output
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      then:
+        - lambda: |-
+            static unsigned long last_on = 0;
+            unsigned long now = millis();
+            
+            if (now - last_on < 500) {
+              ESP_LOGW("light", "Kitchen turn on too frequent, delaying");
+              return;
+            }
+            last_on = now;
+            
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+    on_turn_off:
+      then:
+        - lambda: |-
+            static unsigned long last_off = 0;
+            unsigned long now = millis();
+            
+            if (now - last_off < 500) {
+              ESP_LOGW("light", "Kitchen turn off too frequent, delaying");
+              return;
+            }
+            last_off = now;
+            
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+
+  - platform: binary
+    name: "Dining Light"
+    id: dining_light
+    output: dining_light_output
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      then:
+        - lambda: |-
+            static unsigned long last_on = 0;
+            unsigned long now = millis();
+            
+            if (now - last_on < 500) {
+              ESP_LOGW("light", "Dining turn on too frequent, delaying");
+              return;
+            }
+            last_on = now;
+            
+            if (id(dining_output_locked)) {
+              ESP_LOGW("light", "Dining output locked, ignoring turn on");
+              return;
+            }
+            
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+    on_turn_off:
+      then:
+        - lambda: |-
+            static unsigned long last_off = 0;
+            unsigned long now = millis();
+            
+            if (now - last_off < 500) {
+              ESP_LOGW("light", "Dining turn off too frequent, delaying");
+              return;
+            }
+            last_off = now;
+            
+            if (id(dining_output_locked)) {
+              ESP_LOGW("light", "Dining output locked, ignoring turn off");
+              return;
+            }
+            
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+
+# ====== Switches ======
+switch:
+  - platform: restart
+    name: "Restart Device"
+    id: device_restart
+
+  - platform: safe_mode
+    name: "Safe Mode"
+  
+  - platform: template
+    name: "Output Lock Status"
+    id: output_lock_status
+    lambda: |-
+      return id(dining_output_locked);
+    turn_on_action:
+      - lambda: |-
+          id(dining_output_locked) = true;
+          ESP_LOGI("lock", "Output manually locked");
+    turn_off_action:
+      - lambda: |-
+          id(dining_output_locked) = false;
+          id(output_change_count) = 0;
+          ESP_LOGI("lock", "Output manually unlocked");
+
+# ====== Scripts ======
+script:
+  - id: emergency_recovery
+    mode: restart
+    then:
+      - lambda: |-
+          ESP_LOGE("recovery", "Emergency recovery initiated");
+          
+          gpio_set_level(GPIO_NUM_17, 1);
+          gpio_set_level(GPIO_NUM_27, 1);
+          
+          id(dining_output_locked) = false;
+          id(output_change_count) = 0;
+          id(boot_protection_active) = true;
+          
+          delay(1000);
+          
+          id(boot_protection_active) = false;
+          id(boot_complete) = true;
+          
+          ESP_LOGI("recovery", "Recovery complete, system restored");
+
+# ====== Buttons ======
+binary_sensor:
+  - platform: status
+    name: "Device Status"
+    id: wifi_connected
+
+  - platform: gpio
+    id: btn_next
+    pin:
+      number: GPIO13
+      mode:
+        input: true
+        pulldown: true
+    name: "Next Page"
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    on_press:
+      then:
+        - lambda: |-
+            if (!id(boot_complete)) return;
+            if (id(screen_locked)) return;
+            id(current_page) = (id(current_page) + 1) % id(total_pages);
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+            id(oled_display).update();
+
+  - platform: gpio
+    id: btn_prev
+    pin:
+      number: GPIO14
+      mode:
+        input: true
+        pulldown: true
+    name: "Prev Page"
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    on_press:
+      then:
+        - lambda: |-
+            if (!id(boot_complete)) return;
+            if (id(screen_locked)) return;
+            id(current_page) = (id(current_page) - 1 + id(total_pages)) % id(total_pages);
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+            id(oled_display).update();
+
+  - platform: gpio
+    id: kitchen_light_switch
+    pin:
+      number: GPIO16
+      mode:
+        input: true
+        pulldown: true
+    name: "Kitchen Light Switch"
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+      - delayed_on_off: 100ms
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(boot_complete);'
+            then:
+              - light.toggle: kitchen_light
+              - lambda: |-
+                  static unsigned long last_toggle = 0;
+                  unsigned long now = millis();
+                  if (now - last_toggle < 500) {
+                    ESP_LOGW("button", "Kitchen toggle too fast, ignoring");
+                    return;
+                  }
+                  last_toggle = now;
+                  
+                  id(last_activity) = millis();
+                  if (id(display_sleeping)) {
+                    id(display_sleeping) = false;
+                    id(oled_display).update();
+                  }
+
+  - platform: gpio
+    id: dining_light_switch
+    pin:
+      number: GPIO19
+      mode:
+        input: true
+        pulldown: true
+    name: "Dining Light Switch"
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+      - delayed_on_off: 100ms
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(boot_complete) && !id(dining_output_locked);'
+            then:
+              - light.toggle: dining_light
+              - lambda: |-
+                  static unsigned long last_toggle = 0;
+                  unsigned long now = millis();
+                  if (now - last_toggle < 500) {
+                    ESP_LOGW("button", "Dining toggle too fast, ignoring");
+                    return;
+                  }
+                  last_toggle = now;
+                  
+                  id(last_activity) = millis();
+                  if (id(display_sleeping)) {
+                    id(display_sleeping) = false;
+                    id(oled_display).update();
+                  }
+
+  - platform: gpio
+    id: study_child_switch
+    pin:
+      number: GPIO32
+      mode:
+        input: true
+        pulldown: true
+    name: "Study/Child Switch"
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+      - delayed_on_off: 100ms
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(boot_complete);'
+            then:
+              - mqtt.publish:
+                  topic: kitchen-room/study-child/toggle
+                  payload: ""
+              - lambda: |-
+                  id(last_activity) = millis();
+                  if (id(display_sleeping)) {
+                    id(display_sleeping) = false;
+                    id(oled_display).update();
+                  }
+
+  - platform: gpio
+    id: btn_confirm
+    pin:
+      number: GPIO12
+      mode:
+        input: true
+        pulldown: true
+    name: "Confirm"
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    on_click:
+      - min_length: 0ms
+        max_length: 5000ms
+        then:
+          - lambda: |-
+              if (!id(boot_complete)) return;
+              if (id(screen_locked)) {
+                id(last_activity) = millis();
+                if (id(display_sleeping)) {
+                  id(display_sleeping) = false;
+                  id(oled_display).update();
+                }
+                return;
+              }
+              id(last_activity) = millis();
+              if (id(display_sleeping)) {
+                id(display_sleeping) = false;
+                id(oled_display).update();
+                return;
+              }
+              switch (id(current_page)) {
+                case 0: id(hand_roll_enabled) = !id(hand_roll_enabled); break;
+                case 1: id(kitchen_light).toggle().perform(); id(eye_state) = id(kitchen_light).remote_values.is_on() ? 5 : 4; id(eye_anim_frame) = 0; break;
+                case 2: 
+                  if (!id(dining_output_locked)) {
+                    id(dining_light).toggle().perform(); 
+                    id(eye_state) = id(dining_light).remote_values.is_on() ? 5 : 4; 
+                    id(eye_anim_frame) = 0; 
+                  }
+                  break;
+                case 3: break;
+              }
+              id(oled_display).update();
+      - min_length: 5000ms
+        max_length: 10000ms
+        then:
+          - lambda: |-
+              id(screen_locked) = !id(screen_locked);
+              id(last_activity) = millis();
+              if (id(display_sleeping)) id(display_sleeping) = false;
+              id(oled_display).update();
+      - min_length: 10000ms
+        max_length: 20000ms
+        then:
+          - switch.toggle: device_restart
+
+# ====== Timers ======
+interval:
+  - interval: 2000ms
+    then:
+      - lambda: |-
+          if (!id(boot_complete)) {
+            id(boot_complete) = true;
+            id(kitchen_light).turn_off().perform();
+            id(dining_light).turn_off().perform();
+            id(next_auto_event) = millis() + 2000;
+            id(auto_anim_state) = 0;
+          }
+
+  - interval: 16ms
+    then:
+      - lambda: |-
+          if (!id(boot_complete)) return;
+          if (id(screen_locked)) return;
+          if (id(display_sleeping)) return;
+          if (id(current_page) != 0) return;
+          
+          unsigned long now = millis();
+          id(auto_anim_timer) += 16;
+          
+          if (id(eye_state) == 0 && id(auto_anim_state) == 0) {
+            if (now >= id(next_auto_event)) {
+              if (id(auto_anim_timer) % 3000 < 16) {
+                id(eye_state) = 1;
+                id(eye_anim_frame) = 0;
+                id(auto_anim_state) = 1;
+                id(auto_anim_start_time) = now;
+              }
+            }
+          }
+          
+          if (id(eye_state) == 0 && id(auto_anim_state) == 0) {
+            if (now >= id(next_auto_event)) {
+              if (id(auto_anim_timer) % 5000 < 16) {
+                int r = esp_random() % 100;
+                if (r < 30) { id(eye_state) = 2; }
+                else if (r < 55) { id(eye_state) = 3; }
+                else if (r < 70) { id(eye_state) = 4; }
+                else if (r < 80) { id(eye_state) = 5; }
+                else if (r < 90) { id(eye_state) = 6; }
+                
+                if (id(eye_state) != 0) {
+                  id(eye_anim_frame) = 0;
+                  id(auto_anim_state) = 2;
+                  id(auto_anim_start_time) = now;
+                }
+              }
+            }
+          }
+          
+          if (id(auto_anim_state) > 0) { id(eye_anim_frame) += 1; }
+          
+          if (id(eye_state) > 1 && id(eye_anim_frame) > 20) {
+            id(eye_state) = 0; id(eye_anim_frame) = 0;
+            id(auto_anim_state) = 0;
+            id(next_auto_event) = now + 2000 + (esp_random() % 3000);
+          }
+          
+          if (id(eye_state) == 1 && id(eye_anim_frame) > 6) {
+            id(eye_state) = 0; id(eye_anim_frame) = 0;
+            id(auto_anim_state) = 0;
+            id(next_auto_event) = now + 1000 + (esp_random() % 2000);
+          }
+          
+          id(oled_display).update();
+
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(lcd_sleep_enabled) && !id(screen_locked) && !id(display_sleeping)) {
+            if (millis() - id(last_activity) > id(lcd_sleep_interval)) {
+              id(display_sleeping) = true;
+              id(oled_display).update();
+            }
+          }
+
+  # ====== GPIO 状态监控（修复版） ======
+  - interval: 100ms
+    then:
+      - lambda: |-
+          unsigned long now = millis();
+          
+          if (id(boot_protection_active)) return;
+          
+          static unsigned long lock_time = 0;
+          if (id(dining_output_locked)) {
+            if (lock_time == 0) lock_time = now;
+            if (now - lock_time > 30000) {
+              ESP_LOGI("monitor", "Attempting to unlock output");
+              id(dining_output_locked) = false;
+              id(output_change_count) = 0;
+              lock_time = 0;
+            }
+            return;
+          } else {
+            lock_time = 0;
+          }
+          
+          bool logical_on = id(dining_light).remote_values.is_on();
+          int gpio_state = gpio_get_level(GPIO_NUM_27);
+          
+          // inverted: true 的正确逻辑：
+          // ON  -> GPIO 输出 LOW (0)
+          // OFF -> GPIO 输出 HIGH (1)
+          bool expected_gpio = logical_on ? 0 : 1;
+          bool actual_matches = (gpio_state == expected_gpio);
+          
+          if (!actual_matches && now - id(last_output_change) > 500) {
+            ESP_LOGW("monitor", "State mismatch! Logical: %d, GPIO: %d (expected: %d), Fixing...", 
+                     logical_on, gpio_state, expected_gpio);
+            
+            if (logical_on) {
+              id(dining_light_output).turn_on();
+            } else {
+              id(dining_light_output).turn_off();
+            }
+            id(last_output_change) = now;
+            id(output_change_count)++;
+            
+            if (id(output_change_count) > 5) {
+              ESP_LOGE("monitor", "Excessive state changes detected! Count: %d", id(output_change_count));
+              id(dining_output_locked) = true;
+              id(dining_light_output).turn_off();
+            }
+          } else if (actual_matches) {
+            if (id(output_change_count) > 0 && now - id(last_output_change) > 5000) {
+              id(output_change_count)--;
+            }
+          }
+
+  # ====== 系统健康检查 ======
+  - interval: 5s
+    then:
+      - lambda: |-
+          static int health_check_fails = 0;
+          unsigned long now = millis();
+          
+          bool system_ok = true;
+          
+          if (!id(wifi_connected).state) {
+            system_ok = false;
+            ESP_LOGW("health", "WiFi check failed");
+          }
+          
+          if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < 20000) {
+            system_ok = false;
+            ESP_LOGW("health", "Low memory: %d bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
+          }
+          
+          static unsigned long locked_since = 0;
+          if (id(dining_output_locked)) {
+            if (locked_since == 0) locked_since = now;
+            if (now - locked_since > 120000) {
+              ESP_LOGE("health", "Output locked too long, restarting...");
+              esp_restart();
+            }
+          } else {
+            locked_since = 0;
+          }
+          
+          if (system_ok) {
+            health_check_fails = 0;
+          } else {
+            health_check_fails++;
+            if (health_check_fails > 5) {
+              ESP_LOGE("health", "System unhealthy, restarting...");
+              esp_restart();
+            }
+          }
+          
+          ESP_LOGD("health", "System OK, uptime: %lus, free heap: %d", 
+                   now / 1000, heap_caps_get_free_size(MALLOC_CAP_8BIT));
+
+  # ====== 紧急恢复检查 ======
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(output_change_count) > 10;'
+          then:
+            - script.execute: emergency_recovery
+            - lambda: 'id(output_change_count) = 0;'
+
+# ====== Sensors ======
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+    id: uptime_sensor
+    update_interval: 60s
+    on_raw_value:
+      then:
+        - lambda: |-
+            static float last_uptime = 0;
+            float current_uptime = id(uptime_sensor).get_raw_state();
+            if (current_uptime < last_uptime) {
+              ESP_LOGE("sensor", "Device reset detected! Previous uptime: %.1fs", last_uptime);
+            }
+            last_uptime = current_uptime;
+
+# ====== Text Sensors ======
+text_sensor:
+  - platform: mqtt_subscribe
+    name: "AI Message"
+    id: mqtt_ai_message
+    topic: kitchen-room/ai-message
+    on_value:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+            }
+            id(oled_display).update();
+
+  - platform: template
+    name: "Current Page"
+    id: current_page_name
+    lambda: |-
+      switch (id(current_page)) {
+        case 0: return {"Home"};
+        case 1: return {"Kitchen Light"};
+        case 2: return {"Dining Light"};
+        case 3: return {"Messages"};
+        default: return {"Unknown"};
+      }
+    update_interval: 1s
+
+  - platform: template
+    name: "Lock Status"
+    id: lock_status
+    lambda: |-
+      return id(screen_locked) ? "Locked" : "Unlocked";
+    update_interval: 1s
+
+  - platform: template
+    name: "Dining Output Status"
+    id: dining_output_status
+    lambda: |-
+      if (id(dining_output_locked)) return {"LOCKED"};
+      return id(dining_light).remote_values.is_on() ? "ON" : "OFF";
+    update_interval: 1s
+
+# ====== SH1106 Display ======
+display:
+  - platform: ssd1306_i2c
+    model: "SH1106 128x64"
+    address: 0x3C
+    id: oled_display
+    rotation: 0
+    update_interval: never
+    lambda: |-
+      it.fill(COLOR_OFF);
+      
+      if (!id(boot_complete)) {
+        it.print(64, 24, id(font_title), TextAlign::CENTER, "Starting...");
+        it.print(64, 40, id(font_normal), TextAlign::CENTER, "Lights OFF");
+        return;
+      }
+      
+      if (id(display_sleeping)) return;
+      
+      if (id(screen_locked)) {
+        it.print(64, 24, id(font_title), TextAlign::CENTER, "SCREEN LOCKED");
+        it.print(64, 40, id(font_normal), TextAlign::CENTER, "Hold OK to unlock");
+        return;
+      }
+      
+      switch (id(current_page)) {
+        case 0: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Kitchen Room");
+          it.horizontal_line(0, 17, 128);
+          
+          int L_CX = 40, R_CX = 88, EYE_CY = 38;
+          int EYE_R = 13, PUPIL_R = 5, IRIS_R = 7;
+          int px = 0, py = 1, blink = 0, top_r = 13, bot_r = 13;
+          
+          switch (id(eye_state)) {
+            case 0: px = 0; py = 1; blink = 0; top_r = 13; bot_r = 13; break;
+            case 1: {
+              int f = id(eye_anim_frame);
+              if (f < 2) blink = f * 7;
+              else if (f < 3) blink = 14;
+              else if (f < 5) blink = 14 - (f - 2) * 7;
+              else blink = 0;
+              px = 0; py = 1; top_r = 13; bot_r = 13; break;
+            }
+            case 2: px = -5; py = 1; blink = 0; top_r = 13; bot_r = 13; break;
+            case 3: px = 5; py = 1; blink = 0; top_r = 13; bot_r = 13; break;
+            case 4: px = 0; py = 2; blink = 3; top_r = 10; bot_r = 5; break;
+            case 5: px = 0; py = 0; blink = -2; top_r = 16; bot_r = 14; break;
+            case 6: px = 0; py = 1; blink = 7; top_r = 6; bot_r = 11; break;
+          }
+          
+          auto draw_nomi_eye = [&](int cx, int cy) {
+            if (blink >= 24) { it.horizontal_line(cx - 12, cy, 24); return; }
+            int t = blink > 0 ? top_r - blink : top_r; if (t < 0) t = 0;
+            if (t > 0) for (int x = -EYE_R; x <= EYE_R; x++) {
+              float ratio = (float)x / (float)EYE_R;
+              float sq = 1.0f - ratio * ratio; if (sq < 0) sq = 0;
+              int y_off = (int)((float)t * sqrtf(sq));
+              for (int y = -y_off; y <= 0; y++) it.draw_pixel_at(cx + x, cy + y);
+            }
+            int b = (blink > 4) ? bot_r - (blink - 4) : bot_r; if (b < 0) b = 0;
+            if (b > 0) for (int x = -EYE_R; x <= EYE_R; x++) {
+              float ratio = (float)x / (float)EYE_R;
+              float sq = 1.0f - ratio * ratio; if (sq < 0) sq = 0;
+              int y_off = (int)((float)b * sqrtf(sq));
+              for (int y = 0; y <= y_off; y++) it.draw_pixel_at(cx + x, cy + y);
+            }
+            if (blink < 16) {
+              int ppx = cx + px, ppy = cy + py;
+              it.filled_circle(ppx, ppy, IRIS_R);
+              it.filled_circle(ppx, ppy, PUPIL_R);
+              it.filled_circle(ppx, ppy, PUPIL_R - 2);
+              it.draw_pixel_at(ppx - 2, ppy - 2);
+              it.draw_pixel_at(ppx - 1, ppy - 3);
+              it.draw_pixel_at(ppx + 1, ppy + 1);
+            }
+          };
+          
+          draw_nomi_eye(L_CX, EYE_CY);
+          draw_nomi_eye(R_CX, EYE_CY);
+          
+          it.print(64, 58, id(font_small), TextAlign::CENTER, 
+            id(hand_roll_enabled) ? "Manual | Press OK" : "Auto | Press OK");
+          break;
+        }
+        
+        case 1: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Kitchen Light");
+          it.horizontal_line(0, 17, 128);
+          it.print(64, 28, id(font_normal), TextAlign::CENTER, "Status:");
+          it.print(64, 44, id(font_title), TextAlign::CENTER, 
+            id(kitchen_light).remote_values.is_on() ? "ON" : "OFF");
+          it.filled_circle(64, 52, 3);
+          it.print(64, 59, id(font_small), TextAlign::CENTER, "Press OK to toggle");
+          break;
+        }
+        
+        case 2: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Dining Light");
+          it.horizontal_line(0, 17, 128);
+          it.print(64, 28, id(font_normal), TextAlign::CENTER, "Status:");
+          bool is_on = id(dining_light).remote_values.is_on();
+          it.print(64, 44, id(font_title), TextAlign::CENTER, 
+            id(dining_output_locked) ? "LOCKED" : (is_on ? "ON" : "OFF"));
+          it.filled_circle(64, 52, 3);
+          it.print(64, 59, id(font_small), TextAlign::CENTER, 
+            id(dining_output_locked) ? "Output locked!" : "Press OK to toggle");
+          break;
+        }
+        
+        case 3: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "AI Message");
+          it.horizontal_line(0, 17, 128);
+          std::string msg = id(mqtt_ai_message).state;
+          if (msg.length() > 0) {
+            int y = 24, max_chars = 18;
+            for (int i = 0; i < (int)msg.length() && y < 60; i += max_chars) {
+              it.print(2, y, id(font_small), msg.substr(i, max_chars).c_str());
+              y += 12;
+            }
+          } else {
+            it.print(64, 36, id(font_normal), TextAlign::CENTER, "No messages");
+          }
+          break;
+        }
+      }
+      
+      it.printf(114, 58, id(font_small), TextAlign::CENTER, "%d/%d", 
+        id(current_page) + 1, id(total_pages));
+      if (id(current_page) == 0 && id(hand_roll_enabled)) {
+        it.print(10, 10, id(font_small), TextAlign::CENTER, "M");
+      }
