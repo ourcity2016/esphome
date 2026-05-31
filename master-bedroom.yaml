@@ -1,0 +1,824 @@
+# ============================================================
+# Master Bedroom ESPHome Configuration - NOMI Eyes Edition
+# Chip: ESP32 | Display: SH1106 128x64 I2C | Flash: 16MB
+# Pins: SCK=22, SDA=21, Prev=14, Next=13, Confirm=12
+# 主卧射灯=16, 射灯开关=33(自锁型), 主卧主灯=32, 主灯开关=17(自锁型)
+# 总开关1=26(自锁型), 总开关2=27(自锁型)
+# MQTT: emqx.eyefang.com:1883
+# 动画逻辑: 每3秒眨眼, 每5秒随机表情
+# 继电器: 高电平触发 (inverted: false)
+# ============================================================
+
+esphome:
+  name: master-bedroom
+  friendly_name: Master Bedroom
+  on_boot:
+    - priority: 600
+      then:
+        - output.turn_off: spotlight_output
+        - output.turn_off: main_light_output
+    - priority: 100
+      then:
+        - delay: 300ms
+        - light.turn_off: spotlight
+        - light.turn_off: main_light
+    - priority: -100
+      then:
+        - delay: 800ms
+        - if:
+            condition:
+              lambda: 'return id(spotlight).remote_values.is_on();'
+            then:
+              - light.turn_off: spotlight
+        - if:
+            condition:
+              lambda: 'return id(main_light).remote_values.is_on();'
+            then:
+              - light.turn_off: main_light
+        - lambda: |-
+            id(display_sleeping) = false;
+            id(last_activity) = millis();
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+  flash_size: 16MB
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "MasterBedroom"
+    password: "12345678"
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
+
+# ====== OTA ======
+ota:
+  - platform: esphome
+    password: !secret ota_password
+  - platform: web_server
+
+mqtt:
+  broker: emqx.eyefang.com
+  port: 1883
+  username: admin
+  password: admin
+  discovery: true
+  discovery_prefix: homeassistant
+  topic_prefix: master-bedroom
+  birth_message:
+    topic: master-bedroom/status
+    payload: online
+  will_message:
+    topic: master-bedroom/status
+    payload: offline
+  id: mqtt_client
+  on_message:
+    - topic: master-bedroom/status/request
+      then:
+        - mqtt.publish:
+            topic: master-bedroom/spotlight/state
+            payload: !lambda 'return id(spotlight).remote_values.is_on() ? "ON" : "OFF";'
+        - mqtt.publish:
+            topic: master-bedroom/main-light/state
+            payload: !lambda 'return id(main_light).remote_values.is_on() ? "ON" : "OFF";'
+    - topic: master-bedroom/spotlight/set
+      then:
+        - if:
+            condition:
+              lambda: 'return x == "ON";'
+            then:
+              - light.turn_on: spotlight
+            else:
+              - light.turn_off: spotlight
+    - topic: master-bedroom/spotlight/toggle
+      then:
+        - light.toggle: spotlight
+    - topic: master-bedroom/main-light/set
+      then:
+        - if:
+            condition:
+              lambda: 'return x == "ON";'
+            then:
+              - light.turn_on: main_light
+            else:
+              - light.turn_off: main_light
+    - topic: master-bedroom/main-light/toggle
+      then:
+        - light.toggle: main_light
+    - topic: master-bedroom/all-lights/set
+      then:
+        - if:
+            condition:
+              lambda: 'return x == "ON";'
+            then:
+              - light.turn_on: spotlight
+              - light.turn_on: main_light
+            else:
+              - light.turn_off: spotlight
+              - light.turn_off: main_light
+    - topic: master-bedroom/all-lights/toggle
+      then:
+        - lambda: |-
+            bool all_on = id(spotlight).remote_values.is_on() && 
+                          id(main_light).remote_values.is_on();
+            if (all_on) {
+              id(spotlight).turn_off().perform();
+              id(main_light).turn_off().perform();
+            } else {
+              id(spotlight).turn_on().perform();
+              id(main_light).turn_on().perform();
+            }
+
+web_server:
+  port: 80
+
+logger:
+  level: INFO
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: true
+  frequency: 400kHz
+
+font:
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: regular
+    id: font_title
+    size: 12
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: regular
+    id: font_normal
+    size: 10
+  - file:
+      type: gfonts
+      family: Roboto
+      weight: regular
+    id: font_small
+    size: 8
+
+# ====== Globals ======
+globals:
+  - id: eye_state
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: eye_anim_frame
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: auto_anim_timer
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: current_page
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  - id: last_activity
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: screen_locked
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+
+  - id: hand_roll_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+
+  - id: lcd_sleep_enabled
+    type: bool
+    restore_value: true
+    initial_value: 'true'
+
+  - id: lcd_sleep_interval
+    type: unsigned long
+    restore_value: false
+    initial_value: '60000'
+
+  - id: display_sleeping
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: total_pages
+    type: int
+    restore_value: false
+    initial_value: '5'
+
+  - id: boot_complete
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  - id: auto_anim_state
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: next_auto_event
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+  - id: auto_anim_start_time
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+
+# ====== Outputs (Active HIGH, inverted: false) ======
+output:
+  - platform: gpio
+    pin: GPIO16
+    id: spotlight_output
+    inverted: true
+
+  - platform: gpio
+    pin: GPIO32
+    id: main_light_output
+    inverted: true
+
+# ====== Lights ======
+light:
+  - platform: binary
+    name: "L1-Spotlight"
+    id: spotlight
+    output: spotlight_output
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+            }
+    on_turn_off:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+            }
+
+  - platform: binary
+    name: "L2-Main Light"
+    id: main_light
+    output: main_light_output
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+            }
+    on_turn_off:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+            }
+
+# ====== Switches ======
+switch:
+  - platform: restart
+    name: "S1-Restart Device"
+    id: device_restart
+
+  - platform: safe_mode
+    name: "S2-Safe Mode"
+
+# ====== Binary Sensors (参照Study Room自锁型开关风格) ======
+binary_sensor:
+  # 翻页按键 (点动型)
+  - platform: gpio
+    id: btn_next
+    pin:
+      number: GPIO13
+      mode:
+        input: true
+        pulldown: true
+    name: "B1-Next Page"
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      then:
+        - lambda: |-
+            if (!id(boot_complete)) return;
+            if (id(screen_locked)) return;
+            id(current_page) = (id(current_page) + 1) % id(total_pages);
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+            id(oled_display).update();
+
+  - platform: gpio
+    id: btn_prev
+    pin:
+      number: GPIO14
+      mode:
+        input: true
+        pulldown: true
+    name: "B2-Prev Page"
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      then:
+        - lambda: |-
+            if (!id(boot_complete)) return;
+            if (id(screen_locked)) return;
+            id(current_page) = (id(current_page) - 1 + id(total_pages)) % id(total_pages);
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+            id(oled_display).update();
+
+  # 自锁型：射灯开关 (GPIO33) → follow 射灯 GPIO16
+  - platform: gpio
+    id: spotlight_physical_switch
+    pin:
+      number: GPIO33
+      mode:
+        input: true
+        pulldown: true
+    name: "B3-Spotlight Switch"
+    filters:
+      - delayed_on: 80ms
+      - delayed_off: 80ms
+    on_state:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(boot_complete);'
+            then:
+              - if:
+                  condition:
+                    binary_sensor.is_on: spotlight_physical_switch
+                  then:
+                    - light.turn_on: spotlight
+                    - lambda: |-
+                        id(last_activity) = millis();
+                        if (id(display_sleeping)) {
+                          id(display_sleeping) = false;
+                          id(oled_display).update();
+                        }
+                  else:
+                    - light.turn_off: spotlight
+                    - lambda: |-
+                        id(last_activity) = millis();
+                        if (id(display_sleeping)) {
+                          id(display_sleeping) = false;
+                          id(oled_display).update();
+                        }
+
+  # 自锁型：主灯开关 (GPIO17) → follow 主灯 GPIO32
+  - platform: gpio
+    id: main_light_physical_switch
+    pin:
+      number: GPIO17
+      mode:
+        input: true
+        pulldown: true
+    name: "B4-Main Light Switch"
+    filters:
+      - delayed_on: 80ms
+      - delayed_off: 80ms
+    on_state:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(boot_complete);'
+            then:
+              - if:
+                  condition:
+                    binary_sensor.is_on: main_light_physical_switch
+                  then:
+                    - light.turn_on: main_light
+                    - lambda: |-
+                        id(last_activity) = millis();
+                        if (id(display_sleeping)) {
+                          id(display_sleeping) = false;
+                          id(oled_display).update();
+                        }
+                  else:
+                    - light.turn_off: main_light
+                    - lambda: |-
+                        id(last_activity) = millis();
+                        if (id(display_sleeping)) {
+                          id(display_sleeping) = false;
+                          id(oled_display).update();
+                        }
+
+  # 自锁型：总开关1 (GPIO26) → follow 射灯+主灯
+  - platform: gpio
+    id: master_switch_1
+    pin:
+      number: GPIO26
+      mode:
+        input: true
+        pulldown: true
+    name: "B5-Master Switch 1"
+    filters:
+      - delayed_on: 80ms
+      - delayed_off: 80ms
+    on_state:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(boot_complete);'
+            then:
+              - if:
+                  condition:
+                    binary_sensor.is_on: master_switch_1
+                  then:
+                    - light.turn_on: spotlight
+                    - light.turn_on: main_light
+                    - lambda: |-
+                        id(last_activity) = millis();
+                        if (id(display_sleeping)) {
+                          id(display_sleeping) = false;
+                          id(oled_display).update();
+                        }
+                  else:
+                    - light.turn_off: spotlight
+                    - light.turn_off: main_light
+                    - lambda: |-
+                        id(last_activity) = millis();
+                        if (id(display_sleeping)) {
+                          id(display_sleeping) = false;
+                          id(oled_display).update();
+                        }
+
+  # 自锁型：总开关2 (GPIO27) → follow 射灯+主灯
+  - platform: gpio
+    id: master_switch_2
+    pin:
+      number: GPIO27
+      mode:
+        input: true
+        pulldown: true
+    name: "B6-Master Switch 2"
+    filters:
+      - delayed_on: 80ms
+      - delayed_off: 80ms
+    on_state:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(boot_complete);'
+            then:
+              - if:
+                  condition:
+                    binary_sensor.is_on: master_switch_2
+                  then:
+                    - light.turn_on: spotlight
+                    - light.turn_on: main_light
+                    - lambda: |-
+                        id(last_activity) = millis();
+                        if (id(display_sleeping)) {
+                          id(display_sleeping) = false;
+                          id(oled_display).update();
+                        }
+                  else:
+                    - light.turn_off: spotlight
+                    - light.turn_off: main_light
+                    - lambda: |-
+                        id(last_activity) = millis();
+                        if (id(display_sleeping)) {
+                          id(display_sleeping) = false;
+                          id(oled_display).update();
+                        }
+
+  # 确认按键 (点动型)
+  - platform: gpio
+    id: btn_confirm
+    pin:
+      number: GPIO12
+      mode:
+        input: true
+        pulldown: true
+    name: "B7-Confirm"
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_click:
+      - min_length: 0ms
+        max_length: 5000ms
+        then:
+          - lambda: |-
+              if (!id(boot_complete)) return;
+              if (id(screen_locked)) {
+                id(last_activity) = millis();
+                if (id(display_sleeping)) {
+                  id(display_sleeping) = false;
+                  id(oled_display).update();
+                }
+                return;
+              }
+              id(last_activity) = millis();
+              if (id(display_sleeping)) {
+                id(display_sleeping) = false;
+                id(oled_display).update();
+                return;
+              }
+              switch (id(current_page)) {
+                case 0: id(hand_roll_enabled) = !id(hand_roll_enabled); break;
+                case 1: id(spotlight).toggle().perform(); id(eye_state) = id(spotlight).remote_values.is_on() ? 5 : 4; id(eye_anim_frame) = 0; break;
+                case 2: id(main_light).toggle().perform(); id(eye_state) = id(main_light).remote_values.is_on() ? 5 : 4; id(eye_anim_frame) = 0; break;
+                case 3: break;
+                case 4: break;
+              }
+              id(oled_display).update();
+      - min_length: 5000ms
+        max_length: 10000ms
+        then:
+          - lambda: |-
+              id(screen_locked) = !id(screen_locked);
+              id(last_activity) = millis();
+              if (id(display_sleeping)) id(display_sleeping) = false;
+              id(oled_display).update();
+      - min_length: 10000ms
+        max_length: 20000ms
+        then:
+          - switch.toggle: device_restart
+
+# ====== Timers ======
+interval:
+  - interval: 2000ms
+    then:
+      - lambda: |-
+          if (!id(boot_complete)) {
+            id(boot_complete) = true;
+            id(spotlight).turn_off().perform();
+            id(main_light).turn_off().perform();
+            id(next_auto_event) = millis() + 2000;
+            id(auto_anim_state) = 0;
+          }
+
+  - interval: 16ms
+    then:
+      - lambda: |-
+          if (!id(boot_complete)) return;
+          if (id(screen_locked)) return;
+          if (id(display_sleeping)) return;
+          if (id(current_page) != 0) return;
+          
+          unsigned long now = millis();
+          id(auto_anim_timer) += 16;
+          
+          if (id(eye_state) == 0 && id(auto_anim_state) == 0) {
+            if (now >= id(next_auto_event)) {
+              if (id(auto_anim_timer) % 3000 < 16) {
+                id(eye_state) = 1;
+                id(eye_anim_frame) = 0;
+                id(auto_anim_state) = 1;
+                id(auto_anim_start_time) = now;
+              }
+            }
+          }
+          
+          if (id(eye_state) == 0 && id(auto_anim_state) == 0) {
+            if (now >= id(next_auto_event)) {
+              if (id(auto_anim_timer) % 5000 < 16) {
+                int r = esp_random() % 100;
+                if (r < 30) { id(eye_state) = 2; }
+                else if (r < 55) { id(eye_state) = 3; }
+                else if (r < 70) { id(eye_state) = 4; }
+                else if (r < 80) { id(eye_state) = 5; }
+                else if (r < 90) { id(eye_state) = 6; }
+                
+                if (id(eye_state) != 0) {
+                  id(eye_anim_frame) = 0;
+                  id(auto_anim_state) = 2;
+                  id(auto_anim_start_time) = now;
+                }
+              }
+            }
+          }
+          
+          if (id(auto_anim_state) > 0) { id(eye_anim_frame) += 1; }
+          
+          if (id(eye_state) > 1 && id(eye_anim_frame) > 20) {
+            id(eye_state) = 0; id(eye_anim_frame) = 0;
+            id(auto_anim_state) = 0;
+            id(next_auto_event) = now + 2000 + (esp_random() % 3000);
+          }
+          
+          if (id(eye_state) == 1 && id(eye_anim_frame) > 6) {
+            id(eye_state) = 0; id(eye_anim_frame) = 0;
+            id(auto_anim_state) = 0;
+            id(next_auto_event) = now + 1000 + (esp_random() % 2000);
+          }
+          
+          id(oled_display).update();
+
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (id(lcd_sleep_enabled) && !id(screen_locked) && !id(display_sleeping)) {
+            if (millis() - id(last_activity) > id(lcd_sleep_interval)) {
+              id(display_sleeping) = true;
+              id(oled_display).update();
+            }
+          }
+
+# ====== Sensors ======
+sensor:
+  - platform: wifi_signal
+    name: "T1-WiFi Signal"
+    id: wifi_signal_sensor
+    update_interval: 60s
+
+  - platform: uptime
+    name: "T2-Uptime"
+    update_interval: 60s
+
+# ====== Text Sensors ======
+text_sensor:
+  - platform: mqtt_subscribe
+    name: "AI Message"
+    id: mqtt_ai_message
+    topic: master-bedroom/ai-message
+    on_value:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+            }
+            id(oled_display).update();
+
+  - platform: template
+    name: "T3-Current Page"
+    id: current_page_name
+    lambda: |-
+      switch (id(current_page)) {
+        case 0: return {"Home"};
+        case 1: return {"Spotlight"};
+        case 2: return {"Main Light"};
+        case 3: return {"Messages"};
+        case 4: return {"All Lights"};
+        default: return {"Unknown"};
+      }
+    update_interval: 1s
+
+  - platform: template
+    name: "T4-Lock Status"
+    id: lock_status
+    lambda: |-
+      return id(screen_locked) ? "Locked" : "Unlocked";
+    update_interval: 1s
+
+# ====== NOMI Eyes Display ======
+display:
+  - platform: ssd1306_i2c
+    model: "SH1106 128x64"
+    address: 0x3C
+    id: oled_display
+    rotation: 0
+    update_interval: never
+    lambda: |-
+      it.fill(COLOR_OFF);
+      
+      if (!id(boot_complete)) {
+        it.print(64, 24, id(font_title), TextAlign::CENTER, "Starting...");
+        it.print(64, 40, id(font_normal), TextAlign::CENTER, "Lights OFF");
+        return;
+      }
+      
+      if (id(display_sleeping)) { return; }
+      
+      if (id(screen_locked)) {
+        it.print(64, 24, id(font_title), TextAlign::CENTER, "SCREEN LOCKED");
+        it.print(64, 40, id(font_normal), TextAlign::CENTER, "Hold OK to unlock");
+        return;
+      }
+      
+      switch (id(current_page)) {
+        case 0: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Master Bedroom");
+          it.horizontal_line(0, 17, 128);
+          
+          int L_CX = 40, R_CX = 88, EYE_CY = 38;
+          int EYE_R = 13, PUPIL_R = 5, IRIS_R = 7;
+          int px = 0, py = 1, blink = 0, top_r = 13, bot_r = 13;
+          
+          switch (id(eye_state)) {
+            case 0: px = 0; py = 1; blink = 0; top_r = 13; bot_r = 13; break;
+            case 1: {
+              int f = id(eye_anim_frame);
+              if (f < 2) blink = f * 7;
+              else if (f < 3) blink = 14;
+              else if (f < 5) blink = 14 - (f - 2) * 7;
+              else blink = 0;
+              px = 0; py = 1; top_r = 13; bot_r = 13; break;
+            }
+            case 2: px = -5; py = 1; blink = 0; top_r = 13; bot_r = 13; break;
+            case 3: px = 5; py = 1; blink = 0; top_r = 13; bot_r = 13; break;
+            case 4: px = 0; py = 2; blink = 3; top_r = 10; bot_r = 5; break;
+            case 5: px = 0; py = 0; blink = -2; top_r = 16; bot_r = 14; break;
+            case 6: px = 0; py = 1; blink = 7; top_r = 6; bot_r = 11; break;
+          }
+          
+          auto draw_nomi_eye = [&](int cx, int cy) {
+            if (blink >= 24) { it.horizontal_line(cx - 12, cy, 24); return; }
+            int t = blink > 0 ? top_r - blink : top_r; if (t < 0) t = 0;
+            if (t > 0) for (int x = -EYE_R; x <= EYE_R; x++) {
+              float ratio = (float)x / (float)EYE_R;
+              float sq = 1.0f - ratio * ratio; if (sq < 0) sq = 0;
+              int y_off = (int)((float)t * sqrtf(sq));
+              for (int y = -y_off; y <= 0; y++) it.draw_pixel_at(cx + x, cy + y);
+            }
+            int b = (blink > 4) ? bot_r - (blink - 4) : bot_r; if (b < 0) b = 0;
+            if (b > 0) for (int x = -EYE_R; x <= EYE_R; x++) {
+              float ratio = (float)x / (float)EYE_R;
+              float sq = 1.0f - ratio * ratio; if (sq < 0) sq = 0;
+              int y_off = (int)((float)b * sqrtf(sq));
+              for (int y = 0; y <= y_off; y++) it.draw_pixel_at(cx + x, cy + y);
+            }
+            if (blink < 16) {
+              int ppx = cx + px, ppy = cy + py;
+              it.filled_circle(ppx, ppy, IRIS_R);
+              it.filled_circle(ppx, ppy, PUPIL_R);
+              it.filled_circle(ppx, ppy, PUPIL_R - 2);
+              it.draw_pixel_at(ppx - 2, ppy - 2);
+              it.draw_pixel_at(ppx - 1, ppy - 3);
+              it.draw_pixel_at(ppx + 1, ppy + 1);
+            }
+          };
+          
+          draw_nomi_eye(L_CX, EYE_CY);
+          draw_nomi_eye(R_CX, EYE_CY);
+          
+          it.print(64, 58, id(font_small), TextAlign::CENTER, 
+            id(hand_roll_enabled) ? "Manual | Press OK" : "Auto | Press OK");
+          break;
+        }
+        
+        case 1:
+        case 2: {
+          const char* title = "";
+          const char* status = "";
+          switch (id(current_page)) {
+            case 1: title = "Spotlight"; status = id(spotlight).remote_values.is_on() ? "ON" : "OFF"; break;
+            case 2: title = "Main Light"; status = id(main_light).remote_values.is_on() ? "ON" : "OFF"; break;
+          }
+          it.print(64, 10, id(font_title), TextAlign::CENTER, title);
+          it.horizontal_line(0, 17, 128);
+          it.print(64, 28, id(font_normal), TextAlign::CENTER, "Status:");
+          it.print(64, 44, id(font_title), TextAlign::CENTER, status);
+          it.filled_circle(64, 52, 3);
+          it.print(64, 59, id(font_small), TextAlign::CENTER, "Press OK to toggle");
+          break;
+        }
+        
+        case 3: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "AI Message");
+          it.horizontal_line(0, 17, 128);
+          std::string msg = id(mqtt_ai_message).state;
+          if (msg.length() > 0) {
+            int y = 24, max_chars = 18;
+            for (int i = 0; i < (int)msg.length() && y < 60; i += max_chars) {
+              it.print(2, y, id(font_small), msg.substr(i, max_chars).c_str());
+              y += 12;
+            }
+          } else {
+            it.print(64, 36, id(font_normal), TextAlign::CENTER, "No messages");
+          }
+          break;
+        }
+        
+        case 4: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "All Lights");
+          it.horizontal_line(0, 17, 128);
+          bool spotlight_on = id(spotlight).remote_values.is_on();
+          bool main_on = id(main_light).remote_values.is_on();
+          it.printf(4, 28, id(font_small), "Spotlight: %s", spotlight_on ? "ON " : "OFF");
+          it.printf(4, 40, id(font_small), "Main:      %s", main_on ? "ON " : "OFF");
+          it.printf(4, 52, id(font_small), "WiFi:      %s", 
+            id(wifi_signal_sensor).has_state() ? "Connected" : "Disconnected");
+          break;
+        }
+      }
+      
+      it.printf(114, 58, id(font_small), TextAlign::CENTER, "%d/%d", id(current_page) + 1, id(total_pages));
+      if (id(current_page) == 0 && id(hand_roll_enabled)) it.print(10, 10, id(font_small), TextAlign::CENTER, "M");

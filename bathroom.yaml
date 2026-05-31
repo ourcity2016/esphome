@@ -1,24 +1,33 @@
 # ============================================================
-# Living Room Master Controller - ESPHome Configuration
-# 客厅主控面板 - 通过MQTT Toggle控制Dinner Room和Kitchen Room
-# 
-# 左侧按钮 (GPIO17): Toggle Dinner Room 所有灯
-# 中间按钮 (GPIO16): Toggle Dinner Room 中间灯
-# 右侧按钮 (GPIO18): Toggle Kitchen Room 所有灯
-#
-# 物理开关: 自恢复瞬时触碰开关
-# LCD唤醒: 仅物理按键或灯状态变为ON时唤醒
-# 功能: 启动延时保护, OTA, NOMI眼睛动画
-# 动画: 每3秒眨眼, 每5秒随机表情
+# Bathroom ESPHome Configuration - NOMI Eyes Edition
+# Chip: ESP32-WROOM-32UE | Display: SH1106 128x64 I2C | Flash: 16MB
+# Pins: SCK=22, SDA=21, Prev=14, Next=13, Confirm=12
+# Bathroom Light=17, Bathroom Switch=16 (momentary)
+# MQTT: emqx.eyefang.com:1883
+# 动画逻辑: 每3秒眨眼, 每5秒随机表情
+# 继电器: 高电平触发 (inverted: false)
+# Toggle支持: 客厅主控通过toggle主题切换灯光
 # ============================================================
 
 esphome:
-  name: living-room-master
-  friendly_name: Living Room Master Controller
+  name: bathroom
+  friendly_name: Bathroom
   on_boot:
+    - priority: 600
+      then:
+        - output.turn_off: bathroom_light_output
+    - priority: 100
+      then:
+        - delay: 300ms
+        - light.turn_off: bathroom_light
     - priority: -100
       then:
         - delay: 800ms
+        - if:
+            condition:
+              lambda: 'return id(bathroom_light).remote_values.is_on();'
+            then:
+              - light.turn_off: bathroom_light
         - lambda: |-
             id(display_sleeping) = false;
             id(last_activity) = millis();
@@ -33,7 +42,7 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   ap:
-    ssid: "LivingRoomMaster"
+    ssid: "Bathroom"
     password: "12345678"
 
 api:
@@ -54,75 +63,32 @@ mqtt:
   password: admin
   discovery: true
   discovery_prefix: homeassistant
-  topic_prefix: living-room-master
+  topic_prefix: bathroom
   birth_message:
-    topic: living-room-master/status
+    topic: bathroom/status
     payload: online
   will_message:
-    topic: living-room-master/status
+    topic: bathroom/status
     payload: offline
   id: mqtt_client
   on_message:
-    - topic: dinner-room/left-light/state
+    - topic: bathroom/status/request
       then:
-        - lambda: |-
-            bool prev = id(dinner_left_state);
-            id(dinner_left_state) = (x == "ON");
-            if (!prev && id(dinner_left_state)) {
-              id(last_activity) = millis();
-              if (id(display_sleeping)) {
-                id(display_sleeping) = false;
-                id(oled_display).update();
-              }
-            }
-    - topic: dinner-room/right-light/state
+        - mqtt.publish:
+            topic: bathroom/light/state
+            payload: !lambda 'return id(bathroom_light).remote_values.is_on() ? "ON" : "OFF";'
+    - topic: bathroom/light/set
       then:
-        - lambda: |-
-            bool prev = id(dinner_right_state);
-            id(dinner_right_state) = (x == "ON");
-            if (!prev && id(dinner_right_state)) {
-              id(last_activity) = millis();
-              if (id(display_sleeping)) {
-                id(display_sleeping) = false;
-                id(oled_display).update();
-              }
-            }
-    - topic: dinner-room/center-light/state
+        - if:
+            condition:
+              lambda: 'return x == "ON";'
+            then:
+              - light.turn_on: bathroom_light
+            else:
+              - light.turn_off: bathroom_light
+    - topic: bathroom/light/toggle
       then:
-        - lambda: |-
-            bool prev = id(dinner_center_state);
-            id(dinner_center_state) = (x == "ON");
-            if (!prev && id(dinner_center_state)) {
-              id(last_activity) = millis();
-              if (id(display_sleeping)) {
-                id(display_sleeping) = false;
-                id(oled_display).update();
-              }
-            }
-    - topic: kitchen-room/kitchen-light/state
-      then:
-        - lambda: |-
-            bool prev = id(kitchen_kitchen_state);
-            id(kitchen_kitchen_state) = (x == "ON");
-            if (!prev && id(kitchen_kitchen_state)) {
-              id(last_activity) = millis();
-              if (id(display_sleeping)) {
-                id(display_sleeping) = false;
-                id(oled_display).update();
-              }
-            }
-    - topic: kitchen-room/dining-light/state
-      then:
-        - lambda: |-
-            bool prev = id(kitchen_dining_state);
-            id(kitchen_dining_state) = (x == "ON");
-            if (!prev && id(kitchen_dining_state)) {
-              id(last_activity) = millis();
-              if (id(display_sleeping)) {
-                id(display_sleeping) = false;
-                id(oled_display).update();
-              }
-            }
+        - light.toggle: bathroom_light
 
 web_server:
   port: 80
@@ -162,210 +128,113 @@ globals:
     type: int
     restore_value: false
     initial_value: '0'
+
   - id: eye_anim_frame
     type: int
     restore_value: false
     initial_value: '0'
+
   - id: auto_anim_timer
     type: unsigned long
     restore_value: false
     initial_value: '0'
+
   - id: current_page
     type: int
     restore_value: true
     initial_value: '0'
+
   - id: last_activity
     type: unsigned long
     restore_value: false
     initial_value: '0'
+
   - id: screen_locked
     type: bool
     restore_value: true
     initial_value: 'false'
+
   - id: hand_roll_enabled
     type: bool
     restore_value: true
     initial_value: 'false'
+
   - id: lcd_sleep_enabled
     type: bool
     restore_value: true
     initial_value: 'true'
+
   - id: lcd_sleep_interval
     type: unsigned long
     restore_value: false
     initial_value: '60000'
+
   - id: display_sleeping
     type: bool
     restore_value: false
     initial_value: 'false'
+
   - id: total_pages
     type: int
     restore_value: false
-    initial_value: '5'
+    initial_value: '4'
+
   - id: boot_complete
     type: bool
     restore_value: false
     initial_value: 'false'
+
   - id: auto_anim_state
     type: int
     restore_value: false
     initial_value: '0'
+
   - id: next_auto_event
     type: unsigned long
     restore_value: false
     initial_value: '0'
+
   - id: auto_anim_start_time
     type: unsigned long
     restore_value: false
     initial_value: '0'
-  - id: dinner_left_state
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-  - id: dinner_right_state
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-  - id: dinner_center_state
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-  - id: kitchen_kitchen_state
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-  - id: kitchen_dining_state
-    type: bool
-    restore_value: false
-    initial_value: 'false'
-  - id: last_left_press
-    type: unsigned long
-    restore_value: false
-    initial_value: '0'
-  - id: last_center_press
-    type: unsigned long
-    restore_value: false
-    initial_value: '0'
-  - id: last_right_press
-    type: unsigned long
-    restore_value: false
-    initial_value: '0'
+
+# ====== Output (Active HIGH, inverted: false) ======
+output:
+  - platform: gpio
+    pin: GPIO17
+    id: bathroom_light_output
+    inverted: false
+
+# ====== Light ======
+light:
+  - platform: binary
+    name: "Bathroom Light"
+    id: bathroom_light
+    output: bathroom_light_output
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
+    on_turn_off:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            if (id(display_sleeping)) id(display_sleeping) = false;
 
 # ====== Switches ======
 switch:
-  - platform: template
-    name: "Dinner Room All Lights"
-    id: sw_dinner_all
-    optimistic: true
-    turn_on_action:
-      - mqtt.publish:
-          topic: dinner-room/all-lights/toggle
-          payload: ""
-    turn_off_action:
-      - mqtt.publish:
-          topic: dinner-room/all-lights/toggle
-          payload: ""
-  - platform: template
-    name: "Dinner Room Center Light"
-    id: sw_dinner_center
-    optimistic: true
-    turn_on_action:
-      - mqtt.publish:
-          topic: dinner-room/center-light/toggle
-          payload: ""
-    turn_off_action:
-      - mqtt.publish:
-          topic: dinner-room/center-light/toggle
-          payload: ""
-  - platform: template
-    name: "Kitchen Room All Lights"
-    id: sw_kitchen_all
-    optimistic: true
-    turn_on_action:
-      - mqtt.publish:
-          topic: kitchen-room/all-lights/toggle
-          payload: ""
-    turn_off_action:
-      - mqtt.publish:
-          topic: kitchen-room/all-lights/toggle
-          payload: ""
   - platform: restart
-    name: "Restart Device"
+    name: "S1-Restart Device"
     id: device_restart
+
   - platform: safe_mode
-    name: "Safe Mode"
+    name: "S2-Safe Mode"
 
-# ====== Binary Sensors (Toggle方案 - 瞬时开关, 物理按键唤醒) ======
+# ====== Buttons ======
 binary_sensor:
-  - platform: gpio
-    id: btn_left
-    pin:
-      number: GPIO17
-      mode:
-        input: true
-        pulldown: true
-    name: "Left - Dinner All Lights"
-    filters:
-      - delayed_on: 10ms
-    on_press:
-      then:
-        - lambda: |-
-            if (!id(boot_complete)) return;
-            if (millis() - id(last_left_press) < 500) return;
-            id(last_left_press) = millis();
-            id(last_activity) = millis();
-            if (id(display_sleeping)) {
-              id(display_sleeping) = false;
-              id(oled_display).update();
-            }
-            id(mqtt_client).publish("dinner-room/all-lights/toggle", "");
-
-  - platform: gpio
-    id: btn_center
-    pin:
-      number: GPIO16
-      mode:
-        input: true
-        pulldown: true
-    name: "Center - Dinner Center Light"
-    filters:
-      - delayed_on: 10ms
-    on_press:
-      then:
-        - lambda: |-
-            if (!id(boot_complete)) return;
-            if (millis() - id(last_center_press) < 500) return;
-            id(last_center_press) = millis();
-            id(last_activity) = millis();
-            if (id(display_sleeping)) {
-              id(display_sleeping) = false;
-              id(oled_display).update();
-            }
-            id(mqtt_client).publish("dinner-room/center-light/toggle", "");
-
-  - platform: gpio
-    id: btn_right
-    pin:
-      number: GPIO18
-      mode:
-        input: true
-        pulldown: true
-    name: "Right - Kitchen All Lights"
-    filters:
-      - delayed_on: 10ms
-    on_press:
-      then:
-        - lambda: |-
-            if (!id(boot_complete)) return;
-            if (millis() - id(last_right_press) < 500) return;
-            id(last_right_press) = millis();
-            id(last_activity) = millis();
-            if (id(display_sleeping)) {
-              id(display_sleeping) = false;
-              id(oled_display).update();
-            }
-            id(mqtt_client).publish("kitchen-room/all-lights/toggle", "");
-
   - platform: gpio
     id: btn_next
     pin:
@@ -373,9 +242,10 @@ binary_sensor:
       mode:
         input: true
         pulldown: true
-    name: "Next Page"
+    name: "B1-Next Page"
     filters:
       - delayed_on: 10ms
+      - delayed_off: 10ms
     on_press:
       then:
         - lambda: |-
@@ -393,9 +263,10 @@ binary_sensor:
       mode:
         input: true
         pulldown: true
-    name: "Prev Page"
+    name: "B2-Prev Page"
     filters:
       - delayed_on: 10ms
+      - delayed_off: 10ms
     on_press:
       then:
         - lambda: |-
@@ -407,15 +278,41 @@ binary_sensor:
             id(oled_display).update();
 
   - platform: gpio
+    id: bathroom_light_switch
+    pin:
+      number: GPIO16
+      mode:
+        input: true
+        pulldown: true
+    name: "B3-Bathroom Light Switch"
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    on_press:
+      then:
+        - if:
+            condition:
+              lambda: 'return id(boot_complete);'
+            then:
+              - light.toggle: bathroom_light
+              - lambda: |-
+                  id(last_activity) = millis();
+                  if (id(display_sleeping)) {
+                    id(display_sleeping) = false;
+                    id(oled_display).update();
+                  }
+
+  - platform: gpio
     id: btn_confirm
     pin:
       number: GPIO12
       mode:
         input: true
         pulldown: true
-    name: "Confirm"
+    name: "B4-Confirm"
     filters:
       - delayed_on: 10ms
+      - delayed_off: 10ms
     on_click:
       - min_length: 0ms
         max_length: 5000ms
@@ -438,9 +335,9 @@ binary_sensor:
               }
               switch (id(current_page)) {
                 case 0: id(hand_roll_enabled) = !id(hand_roll_enabled); break;
-                case 1: id(mqtt_client).publish("dinner-room/all-lights/toggle", ""); break;
-                case 2: id(mqtt_client).publish("dinner-room/center-light/toggle", ""); break;
-                case 3: id(mqtt_client).publish("kitchen-room/all-lights/toggle", ""); break;
+                case 1: id(bathroom_light).toggle().perform(); id(eye_state) = id(bathroom_light).remote_values.is_on() ? 5 : 4; id(eye_anim_frame) = 0; break;
+                case 2: break;
+                case 3: break;
               }
               id(oled_display).update();
       - min_length: 5000ms
@@ -451,6 +348,10 @@ binary_sensor:
               id(last_activity) = millis();
               if (id(display_sleeping)) id(display_sleeping) = false;
               id(oled_display).update();
+      - min_length: 10000ms
+        max_length: 20000ms
+        then:
+          - switch.toggle: device_restart
 
 # ====== Timers ======
 interval:
@@ -459,6 +360,7 @@ interval:
       - lambda: |-
           if (!id(boot_complete)) {
             id(boot_complete) = true;
+            id(bathroom_light).turn_off().perform();
             id(next_auto_event) = millis() + 2000;
             id(auto_anim_state) = 0;
           }
@@ -480,6 +382,7 @@ interval:
                 id(eye_state) = 1;
                 id(eye_anim_frame) = 0;
                 id(auto_anim_state) = 1;
+                id(auto_anim_start_time) = now;
               }
             }
           }
@@ -488,20 +391,22 @@ interval:
             if (now >= id(next_auto_event)) {
               if (id(auto_anim_timer) % 5000 < 16) {
                 int r = esp_random() % 100;
-                if (r < 30) id(eye_state) = 2;
-                else if (r < 55) id(eye_state) = 3;
-                else if (r < 70) id(eye_state) = 4;
-                else if (r < 80) id(eye_state) = 5;
-                else if (r < 90) id(eye_state) = 6;
+                if (r < 30) { id(eye_state) = 2; }
+                else if (r < 55) { id(eye_state) = 3; }
+                else if (r < 70) { id(eye_state) = 4; }
+                else if (r < 80) { id(eye_state) = 5; }
+                else if (r < 90) { id(eye_state) = 6; }
+                
                 if (id(eye_state) != 0) {
                   id(eye_anim_frame) = 0;
                   id(auto_anim_state) = 2;
+                  id(auto_anim_start_time) = now;
                 }
               }
             }
           }
           
-          if (id(auto_anim_state) > 0) id(eye_anim_frame) += 1;
+          if (id(auto_anim_state) > 0) { id(eye_anim_frame) += 1; }
           
           if (id(eye_state) > 1 && id(eye_anim_frame) > 20) {
             id(eye_state) = 0; id(eye_anim_frame) = 0;
@@ -527,67 +432,52 @@ interval:
             }
           }
 
-  - interval: 120s
-    then:
-      - mqtt.publish:
-          topic: dinner-room/status/request
-          payload: ""
-      - mqtt.publish:
-          topic: kitchen-room/status/request
-          payload: ""
-
 # ====== Sensors ======
 sensor:
   - platform: wifi_signal
-    name: "WiFi Signal"
+    name: "T1-WiFi Signal"
+    id: wifi_signal_sensor
     update_interval: 60s
+
   - platform: uptime
-    name: "Uptime"
+    name: "T2-Uptime"
+    id: uptime_sensor
     update_interval: 60s
 
 # ====== Text Sensors ======
 text_sensor:
+  - platform: mqtt_subscribe
+    name: "AI Message"
+    id: mqtt_ai_message
+    topic: bathroom/ai-message
+    on_value:
+      then:
+        - lambda: |-
+            id(last_activity) = millis();
+            if (id(display_sleeping)) {
+              id(display_sleeping) = false;
+            }
+            id(oled_display).update();
+
   - platform: template
-    name: "Current Page"
+    name: "T3-Current Page"
     id: current_page_name
     lambda: |-
       switch (id(current_page)) {
         case 0: return {"Home"};
-        case 1: return {"Dinner All"};
-        case 2: return {"Dinner Center"};
-        case 3: return {"Kitchen All"};
-        case 4: return {"Messages"};
+        case 1: return {"Bathroom Light"};
+        case 2: return {"Messages"};
+        case 3: return {"Status"};
         default: return {"Unknown"};
       }
     update_interval: 1s
+
   - platform: template
-    name: "Lock Status"
+    name: "T5-Lock Status"
     id: lock_status
     lambda: |-
       return id(screen_locked) ? "Locked" : "Unlocked";
     update_interval: 1s
-  - platform: template
-    name: "Dinner Room Status"
-    id: dinner_status
-    lambda: |-
-      int count = id(dinner_left_state) + id(dinner_right_state) + id(dinner_center_state);
-      if (count == 3) return {"All ON"};
-      if (count == 0) return {"All OFF"};
-      char buf[16];
-      snprintf(buf, sizeof(buf), "%d/3 ON", count);
-      return {buf};
-    update_interval: 2s
-  - platform: template
-    name: "Kitchen Room Status"
-    id: kitchen_status
-    lambda: |-
-      int count = id(kitchen_kitchen_state) + id(kitchen_dining_state);
-      if (count == 2) return {"All ON"};
-      if (count == 0) return {"All OFF"};
-      char buf[16];
-      snprintf(buf, sizeof(buf), "%d/2 ON", count);
-      return {buf};
-    update_interval: 2s
 
 # ====== NOMI Eyes Display ======
 display:
@@ -602,7 +492,7 @@ display:
       
       if (!id(boot_complete)) {
         it.print(64, 24, id(font_title), TextAlign::CENTER, "Starting...");
-        it.print(64, 40, id(font_normal), TextAlign::CENTER, "Master Controller");
+        it.print(64, 40, id(font_normal), TextAlign::CENTER, "Light OFF");
         return;
       }
       
@@ -616,7 +506,7 @@ display:
       
       switch (id(current_page)) {
         case 0: {
-          it.print(64, 10, id(font_title), TextAlign::CENTER, "Living Room");
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Bathroom");
           it.horizontal_line(0, 17, 128);
           
           int L_CX = 40, R_CX = 88, EYE_CY = 38;
@@ -676,46 +566,47 @@ display:
         }
         
         case 1: {
-          it.print(64, 10, id(font_title), TextAlign::CENTER, "Dinner Room");
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Bathroom Light");
           it.horizontal_line(0, 17, 128);
-          it.print(64, 28, id(font_normal), TextAlign::CENTER, "All Lights");
-          int count = id(dinner_left_state) + id(dinner_right_state) + id(dinner_center_state);
-          if (count == 3) it.print(64, 44, id(font_title), TextAlign::CENTER, "ALL ON");
-          else if (count == 0) it.print(64, 44, id(font_title), TextAlign::CENTER, "ALL OFF");
-          else it.printf(64, 44, id(font_title), TextAlign::CENTER, "%d/3 ON", count);
-          it.print(64, 59, id(font_small), TextAlign::CENTER, "Press OK to toggle");
-          break;
-        }
-        
-        case 2: {
-          it.print(64, 10, id(font_title), TextAlign::CENTER, "Dinner Room");
-          it.horizontal_line(0, 17, 128);
-          it.print(64, 28, id(font_normal), TextAlign::CENTER, "Center Light");
-          it.print(64, 44, id(font_title), TextAlign::CENTER, id(dinner_center_state) ? "ON" : "OFF");
+          it.print(64, 28, id(font_normal), TextAlign::CENTER, "Status:");
+          it.print(64, 44, id(font_title), TextAlign::CENTER, 
+            id(bathroom_light).remote_values.is_on() ? "ON" : "OFF");
           it.filled_circle(64, 52, 3);
           it.print(64, 59, id(font_small), TextAlign::CENTER, "Press OK to toggle");
           break;
         }
         
-        case 3: {
-          it.print(64, 10, id(font_title), TextAlign::CENTER, "Kitchen Room");
+        case 2: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "AI Message");
           it.horizontal_line(0, 17, 128);
-          it.print(64, 28, id(font_normal), TextAlign::CENTER, "All Lights");
-          int count = id(kitchen_kitchen_state) + id(kitchen_dining_state);
-          if (count == 2) it.print(64, 44, id(font_title), TextAlign::CENTER, "ALL ON");
-          else if (count == 0) it.print(64, 44, id(font_title), TextAlign::CENTER, "ALL OFF");
-          else it.printf(64, 44, id(font_title), TextAlign::CENTER, "%d/2 ON", count);
-          it.print(64, 59, id(font_small), TextAlign::CENTER, "Press OK to toggle");
+          std::string msg = id(mqtt_ai_message).state;
+          if (msg.length() > 0) {
+            int y = 24, max_chars = 18;
+            for (int i = 0; i < (int)msg.length() && y < 60; i += max_chars) {
+              it.print(2, y, id(font_small), msg.substr(i, max_chars).c_str());
+              y += 12;
+            }
+          } else {
+            it.print(64, 36, id(font_normal), TextAlign::CENTER, "No messages");
+          }
           break;
         }
         
-        case 4: {
-          it.print(64, 10, id(font_title), TextAlign::CENTER, "AI Message");
+        case 3: {
+          it.print(64, 10, id(font_title), TextAlign::CENTER, "Status");
           it.horizontal_line(0, 17, 128);
-          it.print(64, 36, id(font_normal), TextAlign::CENTER, "No messages");
+          bool light_on = id(bathroom_light).remote_values.is_on();
+          it.printf(4, 28, id(font_small), "Light: %s", light_on ? "ON " : "OFF");
+          it.printf(4, 40, id(font_small), "WiFi:  %s", 
+            id(wifi_signal_sensor).has_state() ? "Connected" : "Disconnected");
+          it.printf(4, 52, id(font_small), "Lock:  %s", 
+            id(screen_locked) ? "Yes" : "No");
           break;
         }
       }
       
-      it.printf(114, 58, id(font_small), TextAlign::CENTER, "%d/%d", id(current_page) + 1, id(total_pages));
-      if (id(current_page) == 0 && id(hand_roll_enabled)) it.print(10, 10, id(font_small), TextAlign::CENTER, "M");
+      it.printf(114, 58, id(font_small), TextAlign::CENTER, "%d/%d", 
+        id(current_page) + 1, id(total_pages));
+      if (id(current_page) == 0 && id(hand_roll_enabled)) {
+        it.print(10, 10, id(font_small), TextAlign::CENTER, "M");
+      }
