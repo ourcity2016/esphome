@@ -1,8 +1,9 @@
 # ============================================================
 # Living Room LED Strip ESPHome Configuration
 # Chip: ESP32 | Flash: 4MB
-# WS2811 12V LED Strip=GPIO16, num_leds=60
+# WS2811 12V LED Strip=GPIO16, num_leds=90
 # MQTT: emqx.eyefang.com:1883
+# 框架: Arduino (FastLED)
 # ============================================================
 
 esphome:
@@ -16,7 +17,7 @@ esphome:
 esp32:
   board: esp32dev
   framework:
-    type: esp-idf
+    type: arduino
   flash_size: 4MB
 
 wifi:
@@ -31,9 +32,11 @@ api:
     key: !secret api_encryption_key
   reboot_timeout: 0s
 
+# ====== OTA ======
 ota:
   - platform: esphome
     password: !secret ota_password
+  - platform: web_server
 
 mqtt:
   broker: emqx.eyefang.com
@@ -63,28 +66,25 @@ mqtt:
     - topic: living-room-strip/strip/toggle
       then:
         - light.toggle: led_strip
-    - topic: living-room-strip/brightness/set
-      then:
-        - lambda: |-
-            int b = atoi(x.c_str());
-            auto call = id(led_strip).turn_on();
-            call.set_brightness(b / 100.0f);
-            call.perform();
+
+web_server:
+  port: 80
 
 logger:
   level: INFO
 
 # ====== WS2811 12V LED Strip ======
 light:
-  - platform: esp32_rmt_led_strip
-    rgb_order: GRB
+  - platform: fastled_clockless
+    chipset: WS2811
     pin: GPIO16
-    num_leds: 60
-    chipset: ws2812
+    num_leds: 90
+    rgb_order: RGB
+    max_refresh_rate: 20ms
+    default_transition_length: 0ms
+    restore_mode: ALWAYS_OFF
     name: "L1-LED Strip"
     id: led_strip
-    default_transition_length: 500ms
-    restore_mode: ALWAYS_OFF
     effects:
       - addressable_rainbow:
           name: "Rainbow"
@@ -94,29 +94,26 @@ light:
           name: "Scan"
       - addressable_twinkle:
           name: "Twinkle"
-      - addressable_random_twinkle:
-          name: "Random Twinkle"
-      - addressable_fireworks:
-          name: "Fireworks"
-      - addressable_flicker:
-          name: "Flicker"
       - pulse:
-          name: "Fast Pulse"
-      - pulse:
-          name: "Slow Pulse"
-          transition_length: 1s
-          update_interval: 2s
+          name: "Pulse"
 
 switch:
   - platform: restart
-    name: "Restart Device"
+    name: "S1-Restart Device"
   - platform: safe_mode
-    name: "Safe Mode"
+    name: "S2-Safe Mode"
 
 sensor:
   - platform: wifi_signal
-    name: "WiFi Signal"
+    name: "T1-WiFi Signal"
     update_interval: 60s
   - platform: uptime
-    name: "Uptime"
+    name: "T2-Uptime"
     update_interval: 60s
+
+text_sensor:
+  - platform: template
+    name: "T3-LED Status"
+    lambda: |-
+      return id(led_strip).remote_values.is_on() ? "ON" : "OFF";
+    update_interval: 1s

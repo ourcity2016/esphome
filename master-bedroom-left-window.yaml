@@ -55,58 +55,49 @@ mqtt:
   on_message:
     - topic: master-bedroom-left-window/sheer/set
       then:
-        - if:
-            condition:
-              lambda: 'return x == "ON";'
-            then:
-              - script.execute: sheer_open
-        - if:
-            condition:
-              lambda: 'return x == "OFF";'
-            then:
-              - script.execute: sheer_close
-        - if:
-            condition:
-              lambda: 'return x == "STOP";'
-            then:
-              - script.execute: sheer_stop
+        - lambda: |-
+            std::string cmd(x);
+            ESP_LOGI("MQTT", "Sheer command received: %s", cmd.c_str());
+            if (cmd == "ON") {
+              id(sheer_open)->execute();
+            } else if (cmd == "OFF") {
+              id(sheer_close)->execute();
+            } else if (cmd == "STOP") {
+              id(sheer_stop)->execute();
+            } else {
+              ESP_LOGW("MQTT", "Unknown sheer command: %s", cmd.c_str());
+            }
     - topic: master-bedroom-left-window/curtain/set
       then:
-        - if:
-            condition:
-              lambda: 'return x == "ON";'
-            then:
-              - script.execute: curtain_open
-        - if:
-            condition:
-              lambda: 'return x == "OFF";'
-            then:
-              - script.execute: curtain_close
-        - if:
-            condition:
-              lambda: 'return x == "STOP";'
-            then:
-              - script.execute: curtain_stop
+        - lambda: |-
+            std::string cmd(x);
+            ESP_LOGI("MQTT", "Curtain command received: %s", cmd.c_str());
+            if (cmd == "ON") {
+              id(curtain_open)->execute();
+            } else if (cmd == "OFF") {
+              id(curtain_close)->execute();
+            } else if (cmd == "STOP") {
+              id(curtain_stop)->execute();
+            } else {
+              ESP_LOGW("MQTT", "Unknown curtain command: %s", cmd.c_str());
+            }
     - topic: master-bedroom-left-window/all/set
       then:
-        - if:
-            condition:
-              lambda: 'return x == "ON";'
-            then:
-              - script.execute: sheer_open
-              - script.execute: curtain_open
-        - if:
-            condition:
-              lambda: 'return x == "OFF";'
-            then:
-              - script.execute: sheer_close
-              - script.execute: curtain_close
-        - if:
-            condition:
-              lambda: 'return x == "STOP";'
-            then:
-              - script.execute: sheer_stop
-              - script.execute: curtain_stop
+        - lambda: |-
+            std::string cmd(x);
+            ESP_LOGI("MQTT", "All command received: %s", cmd.c_str());
+            if (cmd == "ON") {
+              id(sheer_open)->execute();
+              id(curtain_open)->execute();
+            } else if (cmd == "OFF") {
+              id(sheer_close)->execute();
+              id(curtain_close)->execute();
+            } else if (cmd == "STOP") {
+              id(sheer_stop)->execute();
+              id(curtain_stop)->execute();
+            } else {
+              ESP_LOGW("MQTT", "Unknown all command: %s", cmd.c_str());
+            }
     - topic: master-bedroom-left-window/sheer/toggle
       then:
         - script.execute: sheer_toggle
@@ -122,19 +113,40 @@ web_server:
   port: 80
 
 logger:
-  level: INFO
+  level: DEBUG
+  baud_rate: 0  # 禁用串口日志，避免干扰UART
 
 # ====== UART + RS485 方向控制 ======
 uart:
   - id: uart_sheer
-    tx_pin: GPIO17
-    rx_pin: GPIO16
+    tx_pin: GPIO16
+    rx_pin: GPIO17
     baud_rate: 9600
+    data_bits: 8
+    stop_bits: 1
+    parity: NONE
+    debug:
+      direction: BOTH
+      after:
+        delimiter: "\n"
+      sequence:
+        - lambda: |-
+            UARTDebug::log_hex(direction, bytes, ' ');
 
   - id: uart_curtain
     tx_pin: GPIO23
     rx_pin: GPIO22
     baud_rate: 9600
+    data_bits: 8
+    stop_bits: 1
+    parity: NONE
+    debug:
+      direction: BOTH
+      after:
+        delimiter: "\n"
+      sequence:
+        - lambda: |-
+            UARTDebug::log_hex(direction, bytes, ' ');
 
 # RS485 方向控制引脚 (DE/RE)
 output:
@@ -172,6 +184,30 @@ switch:
     id: device_restart
   - platform: safe_mode
     name: "S2-Safe Mode"
+  - platform: template
+    name: "S3-Test Sheer ON"
+    turn_on_action:
+      - script.execute: sheer_open
+  - platform: template
+    name: "S4-Test Sheer OFF"
+    turn_on_action:
+      - script.execute: sheer_close
+  - platform: template
+    name: "S5-Test Sheer STOP"
+    turn_on_action:
+      - script.execute: sheer_stop
+  - platform: template
+    name: "S6-Test Curtain ON"
+    turn_on_action:
+      - script.execute: curtain_open
+  - platform: template
+    name: "S7-Test Curtain OFF"
+    turn_on_action:
+      - script.execute: curtain_close
+  - platform: template
+    name: "S8-Test Curtain STOP"
+    turn_on_action:
+      - script.execute: curtain_stop
 
 # ====== Cover (HA 窗帘实体) ======
 cover:
@@ -235,16 +271,21 @@ text_sensor:
       }
     update_interval: 1s
 
-# ====== Scripts (485写入: 拉高DE → 写数据 → 拉低DE) ======
+# ====== Scripts (485写入: 拉高DE → 写数据 → 等待发送完成 → 拉低DE) ======
 script:
   - id: sheer_open
     then:
+      - lambda: |-
+          ESP_LOGI("SHEER", "Opening sheer...");
       - output.turn_on: rs485_de_sheer
-      - delay: 5ms
+      - delay: 10ms
       - lambda: |-
           uint8_t cmd[6] = {0x00,0x00,0x00,0x03,0x00,0x03};
           id(uart_sheer).write_array(cmd, 6);
-      - delay: 10ms
+          id(uart_sheer).flush();
+          ESP_LOGI("SHEER", "Sent OPEN command: %02X %02X %02X %02X %02X %02X", 
+                   cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5]);
+      - delay: 20ms
       - output.turn_off: rs485_de_sheer
       - lambda: |-
           id(sheer_state) = 3;
@@ -252,12 +293,17 @@ script:
 
   - id: sheer_close
     then:
+      - lambda: |-
+          ESP_LOGI("SHEER", "Closing sheer...");
       - output.turn_on: rs485_de_sheer
-      - delay: 5ms
+      - delay: 10ms
       - lambda: |-
           uint8_t cmd[6] = {0x00,0x00,0x00,0x01,0x00,0x01};
           id(uart_sheer).write_array(cmd, 6);
-      - delay: 10ms
+          id(uart_sheer).flush();
+          ESP_LOGI("SHEER", "Sent CLOSE command: %02X %02X %02X %02X %02X %02X", 
+                   cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5]);
+      - delay: 20ms
       - output.turn_off: rs485_de_sheer
       - lambda: |-
           id(sheer_state) = 2;
@@ -265,12 +311,17 @@ script:
 
   - id: sheer_stop
     then:
+      - lambda: |-
+          ESP_LOGI("SHEER", "Stopping sheer...");
       - output.turn_on: rs485_de_sheer
-      - delay: 5ms
+      - delay: 10ms
       - lambda: |-
           uint8_t cmd[6] = {0x00,0x00,0x00,0x02,0x00,0x02};
           id(uart_sheer).write_array(cmd, 6);
-      - delay: 10ms
+          id(uart_sheer).flush();
+          ESP_LOGI("SHEER", "Sent STOP command: %02X %02X %02X %02X %02X %02X", 
+                   cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5]);
+      - delay: 20ms
       - output.turn_off: rs485_de_sheer
       - lambda: |-
           id(sheer_state) = 1;
@@ -302,12 +353,17 @@ script:
 
   - id: curtain_open
     then:
+      - lambda: |-
+          ESP_LOGI("CURTAIN", "Opening curtain...");
       - output.turn_on: rs485_de_curtain
-      - delay: 5ms
+      - delay: 10ms
       - lambda: |-
           uint8_t cmd[6] = {0x00,0x00,0x00,0x03,0x00,0x03};
           id(uart_curtain).write_array(cmd, 6);
-      - delay: 10ms
+          id(uart_curtain).flush();
+          ESP_LOGI("CURTAIN", "Sent OPEN command: %02X %02X %02X %02X %02X %02X", 
+                   cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5]);
+      - delay: 20ms
       - output.turn_off: rs485_de_curtain
       - lambda: |-
           id(curtain_state) = 3;
@@ -315,12 +371,17 @@ script:
 
   - id: curtain_close
     then:
+      - lambda: |-
+          ESP_LOGI("CURTAIN", "Closing curtain...");
       - output.turn_on: rs485_de_curtain
-      - delay: 5ms
+      - delay: 10ms
       - lambda: |-
           uint8_t cmd[6] = {0x00,0x00,0x00,0x01,0x00,0x01};
           id(uart_curtain).write_array(cmd, 6);
-      - delay: 10ms
+          id(uart_curtain).flush();
+          ESP_LOGI("CURTAIN", "Sent CLOSE command: %02X %02X %02X %02X %02X %02X", 
+                   cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5]);
+      - delay: 20ms
       - output.turn_off: rs485_de_curtain
       - lambda: |-
           id(curtain_state) = 2;
@@ -328,12 +389,17 @@ script:
 
   - id: curtain_stop
     then:
+      - lambda: |-
+          ESP_LOGI("CURTAIN", "Stopping curtain...");
       - output.turn_on: rs485_de_curtain
-      - delay: 5ms
+      - delay: 10ms
       - lambda: |-
           uint8_t cmd[6] = {0x00,0x00,0x00,0x02,0x00,0x02};
           id(uart_curtain).write_array(cmd, 6);
-      - delay: 10ms
+          id(uart_curtain).flush();
+          ESP_LOGI("CURTAIN", "Sent STOP command: %02X %02X %02X %02X %02X %02X", 
+                   cmd[0], cmd[1], cmd[2], cmd[3], cmd[4], cmd[5]);
+      - delay: 20ms
       - output.turn_off: rs485_de_curtain
       - lambda: |-
           id(curtain_state) = 1;
