@@ -8,6 +8,7 @@
 # MQTT: emqx.eyefang.com:1883
 # 动画逻辑: 每3秒眨眼, 每5秒随机表情
 # 继电器: 低电平触发 (inverted: true)
+# 修复: 添加GPIO锁定、状态锁、去抖保护解决Dining Light闪烁
 # ============================================================
 
 esphome:
@@ -21,32 +22,27 @@ esphome:
             gpio_set_level(GPIO_NUM_17, 1);
             gpio_set_direction(GPIO_NUM_27, GPIO_MODE_OUTPUT);
             gpio_set_level(GPIO_NUM_27, 1);
-    
+            gpio_hold_en(GPIO_NUM_27);
     - priority: 600
       then:
         - output.turn_off: kitchen_light_output
         - output.turn_off: dining_light_output
-    
-    - priority: 500
-      then:
-        - delay: 100ms
-        - output.turn_off: kitchen_light_output
-        - output.turn_off: dining_light_output
-    
     - priority: 400
       then:
-        - delay: 500ms
+        - delay: 200ms
         - lambda: |-
+            gpio_hold_dis(GPIO_NUM_27);
             id(boot_complete) = true;
-    
+            id(init_phase_done) = true;
+            id(light_toggle_lock) = false;
+            id(display_sleeping) = false;
+            id(last_activity) = millis();
     - priority: 250
       then:
         - light.turn_off: kitchen_light
         - light.turn_off: dining_light
         - lambda: |-
-            id(display_sleeping) = false;
-            id(last_activity) = millis();
-    
+            id(light_toggle_lock) = false;
     - priority: -100
       then:
         - delay: 500ms
@@ -114,58 +110,119 @@ mqtt:
       then:
         - if:
             condition:
-              lambda: 'return x == "ON";'
+              and:
+                - lambda: 'return id(init_phase_done);'
+                - lambda: 'return !id(light_toggle_lock);'
+                - lambda: 'return (millis() - id(last_toggle_time)) > 300;'
             then:
-              - light.turn_on: kitchen_light
-            else:
-              - light.turn_off: kitchen_light
+              - lambda: |-
+                  id(light_toggle_lock) = true;
+                  id(last_toggle_time) = millis();
+              - if:
+                  condition:
+                    lambda: 'return x == "ON";'
+                  then:
+                    - light.turn_on: kitchen_light
+                  else:
+                    - light.turn_off: kitchen_light
+              - delay: 300ms
+              - lambda: 'id(light_toggle_lock) = false;'
     - topic: kitchen-room/dining-light/set
       then:
         - if:
             condition:
-              lambda: 'return x == "ON";'
+              and:
+                - lambda: 'return id(init_phase_done);'
+                - lambda: 'return !id(light_toggle_lock);'
+                - lambda: 'return (millis() - id(last_toggle_time)) > 300;'
             then:
-              - light.turn_on: dining_light
-            else:
-              - light.turn_off: dining_light
+              - lambda: |-
+                  id(light_toggle_lock) = true;
+                  id(last_toggle_time) = millis();
+              - if:
+                  condition:
+                    lambda: 'return x == "ON";'
+                  then:
+                    - light.turn_on: dining_light
+                  else:
+                    - light.turn_off: dining_light
+              - delay: 300ms
+              - lambda: 'id(light_toggle_lock) = false;'
     - topic: kitchen-room/all-lights/set
       then:
         - if:
             condition:
-              lambda: 'return x == "ON";'
+              and:
+                - lambda: 'return id(init_phase_done);'
+                - lambda: 'return !id(light_toggle_lock);'
             then:
-              - light.turn_on: kitchen_light
-              - light.turn_on: dining_light
-            else:
-              - light.turn_off: kitchen_light
-              - light.turn_off: dining_light
+              - lambda: |-
+                  id(light_toggle_lock) = true;
+                  id(last_toggle_time) = millis();
+              - if:
+                  condition:
+                    lambda: 'return x == "ON";'
+                  then:
+                    - light.turn_on: kitchen_light
+                    - light.turn_on: dining_light
+                  else:
+                    - light.turn_off: kitchen_light
+                    - light.turn_off: dining_light
+              - delay: 300ms
+              - lambda: 'id(light_toggle_lock) = false;'
     - topic: kitchen-room/all-lights/toggle
       then:
-        - lambda: |-
-            bool all_on = id(kitchen_light).remote_values.is_on() && 
-                          id(dining_light).remote_values.is_on();
-            if (all_on) {
-              id(kitchen_light).turn_off().perform();
-              id(dining_light).turn_off().perform();
-            } else {
-              id(kitchen_light).turn_on().perform();
-              id(dining_light).turn_on().perform();
-            }
+        - if:
+            condition:
+              and:
+                - lambda: 'return id(init_phase_done);'
+                - lambda: 'return !id(light_toggle_lock);'
+                - lambda: 'return (millis() - id(last_toggle_time)) > 300;'
+            then:
+              - lambda: |-
+                  id(light_toggle_lock) = true;
+                  id(last_toggle_time) = millis();
+                  bool all_on = id(kitchen_light).remote_values.is_on() && 
+                                id(dining_light).remote_values.is_on();
+                  if (all_on) {
+                    id(kitchen_light).turn_off().perform();
+                    id(dining_light).turn_off().perform();
+                  } else {
+                    id(kitchen_light).turn_on().perform();
+                    id(dining_light).turn_on().perform();
+                  }
+              - delay: 300ms
+              - lambda: 'id(light_toggle_lock) = false;'
     - topic: kitchen-room/kitchen-light/toggle
       then:
-        - light.toggle: kitchen_light
+        - if:
+            condition:
+              and:
+                - lambda: 'return id(init_phase_done);'
+                - lambda: 'return !id(light_toggle_lock);'
+                - lambda: 'return (millis() - id(last_toggle_time)) > 300;'
+            then:
+              - lambda: |-
+                  id(light_toggle_lock) = true;
+                  id(last_toggle_time) = millis();
+              - light.toggle: kitchen_light
+              - delay: 300ms
+              - lambda: 'id(light_toggle_lock) = false;'
     - topic: kitchen-room/dining-light/toggle
       then:
-        - light.toggle: dining_light
-    # 订阅 Dining Room 状态，用于 GPIO32 判断
-    - topic: dining-room/balcony-light/state
-      then:
-        - lambda: |-
-            id(dining_balcony_light_state) = (x == "ON");
-    - topic: dining-room/balcony-spotlight/state
-      then:
-        - lambda: |-
-            id(dining_balcony_spotlight_state) = (x == "ON");
+        - if:
+            condition:
+              and:
+                - lambda: 'return id(init_phase_done);'
+                - lambda: 'return !id(light_toggle_lock);'
+                - lambda: 'return (millis() - id(last_toggle_time)) > 300;'
+            then:
+              - lambda: |-
+                  id(light_toggle_lock) = true;
+                  id(last_toggle_time) = millis();
+              - light.toggle: dining_light
+              - delay: 300ms
+              - lambda: 'id(light_toggle_lock) = false;'
 
 web_server:
   port: 80
@@ -261,12 +318,15 @@ globals:
     type: unsigned long
     restore_value: false
     initial_value: '0'
-  # Dining Room 状态存储
-  - id: dining_balcony_light_state
+  - id: light_toggle_lock
     type: bool
     restore_value: false
     initial_value: 'false'
-  - id: dining_balcony_spotlight_state
+  - id: last_toggle_time
+    type: unsigned long
+    restore_value: false
+    initial_value: '0'
+  - id: init_phase_done
     type: bool
     restore_value: false
     initial_value: 'false'
@@ -277,7 +337,6 @@ output:
     pin: GPIO17
     id: kitchen_light_output
     inverted: true
-
   - platform: gpio
     pin: GPIO27
     id: dining_light_output
@@ -293,14 +352,15 @@ light:
     on_turn_on:
       then:
         - lambda: |-
+            if (!id(init_phase_done)) return;
             id(last_activity) = millis();
             if (id(display_sleeping)) id(display_sleeping) = false;
     on_turn_off:
       then:
         - lambda: |-
+            if (!id(init_phase_done)) return;
             id(last_activity) = millis();
             if (id(display_sleeping)) id(display_sleeping) = false;
-
   - platform: binary
     name: "L2-Dining Light"
     id: dining_light
@@ -309,11 +369,13 @@ light:
     on_turn_on:
       then:
         - lambda: |-
+            if (!id(init_phase_done)) return;
             id(last_activity) = millis();
             if (id(display_sleeping)) id(display_sleeping) = false;
     on_turn_off:
       then:
         - lambda: |-
+            if (!id(init_phase_done)) return;
             id(last_activity) = millis();
             if (id(display_sleeping)) id(display_sleeping) = false;
 
@@ -369,7 +431,6 @@ binary_sensor:
             if (id(display_sleeping)) id(display_sleeping) = false;
             id(oled_display).update();
 
-  # Kitchen Light 开关
   - platform: gpio
     id: kitchen_light_switch
     pin:
@@ -379,23 +440,29 @@ binary_sensor:
         pulldown: true
     name: "B3-Kitchen Light Switch"
     filters:
-      - delayed_on: 50ms
-      - delayed_off: 50ms
+      - delayed_on: 80ms
+      - delayed_off: 80ms
     on_press:
       then:
         - if:
             condition:
-              lambda: 'return id(boot_complete);'
+              and:
+                - lambda: 'return id(boot_complete) && id(init_phase_done);'
+                - lambda: 'return !id(light_toggle_lock);'
+                - lambda: 'return (millis() - id(last_toggle_time)) > 300;'
             then:
-              - light.toggle: kitchen_light
               - lambda: |-
+                  id(light_toggle_lock) = true;
+                  id(last_toggle_time) = millis();
                   id(last_activity) = millis();
                   if (id(display_sleeping)) {
                     id(display_sleeping) = false;
                     id(oled_display).update();
                   }
+              - light.toggle: kitchen_light
+              - delay: 300ms
+              - lambda: 'id(light_toggle_lock) = false;'
 
-  # Dining Light 开关
   - platform: gpio
     id: dining_light_switch
     pin:
@@ -405,23 +472,29 @@ binary_sensor:
         pulldown: true
     name: "B4-Dining Light Switch"
     filters:
-      - delayed_on: 50ms
-      - delayed_off: 50ms
+      - delayed_on: 80ms
+      - delayed_off: 80ms
     on_press:
       then:
         - if:
             condition:
-              lambda: 'return id(boot_complete);'
+              and:
+                - lambda: 'return id(boot_complete) && id(init_phase_done);'
+                - lambda: 'return !id(light_toggle_lock);'
+                - lambda: 'return (millis() - id(last_toggle_time)) > 300;'
             then:
-              - light.toggle: dining_light
               - lambda: |-
+                  id(light_toggle_lock) = true;
+                  id(last_toggle_time) = millis();
                   id(last_activity) = millis();
                   if (id(display_sleeping)) {
                     id(display_sleeping) = false;
                     id(oled_display).update();
                   }
+              - light.toggle: dining_light
+              - delay: 300ms
+              - lambda: 'id(light_toggle_lock) = false;'
 
-  # GPIO32: Dining Room 所有灯 (根据状态智能切换)
   - platform: gpio
     id: dining_room_all_switch
     pin:
@@ -445,13 +518,9 @@ binary_sensor:
                     id(display_sleeping) = false;
                     id(oled_display).update();
                   }
-                  // 判断 Dining Room 状态：任一灯开着就发 OFF，否则发 ON
-                  bool any_on = id(dining_balcony_light_state) || id(dining_balcony_spotlight_state);
-                  if (any_on) {
-                    id(mqtt_client).publish("dining-room/all/set", "OFF");
-                  } else {
-                    id(mqtt_client).publish("dining-room/all/set", "ON");
-                  }
+              - mqtt.publish:
+                  topic: dining-room/all/toggle
+                  payload: ""
 
   - platform: gpio
     id: btn_confirm
@@ -469,7 +538,7 @@ binary_sensor:
         max_length: 5000ms
         then:
           - lambda: |-
-              if (!id(boot_complete)) return;
+              if (!id(boot_complete) || !id(init_phase_done)) return;
               if (id(screen_locked)) {
                 id(last_activity) = millis();
                 if (id(display_sleeping)) {
@@ -478,27 +547,38 @@ binary_sensor:
                 }
                 return;
               }
+              if (id(light_toggle_lock)) return;
+              
               id(last_activity) = millis();
               if (id(display_sleeping)) {
                 id(display_sleeping) = false;
                 id(oled_display).update();
                 return;
               }
+              
               switch (id(current_page)) {
-                case 0: id(hand_roll_enabled) = !id(hand_roll_enabled); break;
-                case 1: id(kitchen_light).toggle().perform(); id(eye_state) = id(kitchen_light).remote_values.is_on() ? 5 : 4; id(eye_anim_frame) = 0; break;
-                case 2: id(dining_light).toggle().perform(); id(eye_state) = id(dining_light).remote_values.is_on() ? 5 : 4; id(eye_anim_frame) = 0; break;
-                case 3: 
-                  {
-                    bool any_on = id(dining_balcony_light_state) || id(dining_balcony_spotlight_state);
-                    if (any_on) {
-                      id(mqtt_client).publish("dining-room/all/set", "OFF");
-                    } else {
-                      id(mqtt_client).publish("dining-room/all/set", "ON");
-                    }
-                  }
+                case 0: 
+                  id(hand_roll_enabled) = !id(hand_roll_enabled); 
                   break;
-                case 4: break;
+                case 1: 
+                  id(light_toggle_lock) = true;
+                  id(last_toggle_time) = millis();
+                  id(kitchen_light).toggle().perform(); 
+                  id(eye_state) = id(kitchen_light).remote_values.is_on() ? 5 : 4; 
+                  id(eye_anim_frame) = 0; 
+                  break;
+                case 2: 
+                  id(light_toggle_lock) = true;
+                  id(last_toggle_time) = millis();
+                  id(dining_light).toggle().perform(); 
+                  id(eye_state) = id(dining_light).remote_values.is_on() ? 5 : 4; 
+                  id(eye_anim_frame) = 0; 
+                  break;
+                case 3: 
+                  id(mqtt_client).publish("dining-room/all/toggle", ""); 
+                  break;
+                case 4: 
+                  break;
               }
               id(oled_display).update();
       - min_length: 5000ms
@@ -521,6 +601,8 @@ interval:
       - lambda: |-
           if (!id(boot_complete)) {
             id(boot_complete) = true;
+            id(init_phase_done) = true;
+            id(light_toggle_lock) = false;
             id(kitchen_light).turn_off().perform();
             id(dining_light).turn_off().perform();
             id(next_auto_event) = millis() + 2000;
@@ -593,13 +675,6 @@ interval:
               id(oled_display).update();
             }
           }
-
-  # 定期请求 Dining Room 状态
-  - interval: 60s
-    then:
-      - mqtt.publish:
-          topic: dining-room/status/request
-          payload: ""
 
 # ====== Sensors ======
 sensor:
@@ -741,13 +816,7 @@ display:
           switch (id(current_page)) {
             case 1: title = "Kitchen Light"; status = id(kitchen_light).remote_values.is_on() ? "ON" : "OFF"; break;
             case 2: title = "Dining Light"; status = id(dining_light).remote_values.is_on() ? "ON" : "OFF"; break;
-            case 3: 
-              title = "Dining Room";
-              {
-                bool any_on = id(dining_balcony_light_state) || id(dining_balcony_spotlight_state);
-                status = any_on ? "ON" : "OFF";
-              }
-              break;
+            case 3: title = "Dining Room"; status = "Toggle"; break;
           }
           it.print(64, 10, id(font_title), TextAlign::CENTER, title);
           it.horizontal_line(0, 17, 128);
